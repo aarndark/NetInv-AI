@@ -1,1 +1,19 @@
-Flask>=3.0
+# Зависимости Python для NetInv
+# Установка: pip install -r requirements.txt
+# (инсталлятор install.sh делает это автоматически в виртуальном окружении .venv)
+#
+# Примечание: стандартная библиотека Python (sqlite3, subprocess, xml,
+# ipaddress, socket и т.п.) дополнительных пакетов не требует.
+# Внешние утилиты (nmap, whatweb, curl, dig, dnsmap, dnsenum, dnsrecon)
+# ставятся как системные пакеты, а не через pip.
+
+# Веб-интерфейс
+Flask==3.1.3
+
+# Транзитивные зависимости Flask (зафиксированы для воспроизводимости окружения)
+Werkzeug==3.1.8
+Jinja2==3.1.6
+MarkupSafe==3.0.3
+itsdangerous==2.2.0
+click==8.4.1
+blinker==1.9.0
