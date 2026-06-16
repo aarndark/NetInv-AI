@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}NetInv — Инвентаризационное сканирование{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <header class="topbar">
+    <!-- Требование 2: логотип и надпись NetInv — ссылка на стартовую страницу -->
+    <a class="brand" href="{{ url_for('index') }}" title="На стартовую страницу NetInv">
+      🛰️ NetInv <span class="sub">Continuous Pentest Inventory</span>
+    </a>
+    <nav>
+      <a href="{{ url_for('index') }}">Объекты</a>
+      <a href="{{ url_for('runs') }}">История запусков</a>
+      {% if current_user %}
+        <span class="nav-user">👤 {{ current_user }}</span>
+        <form method="post" action="{{ url_for('logout') }}" class="nav-logout">
+          <button type="submit" class="btn link">Выйти</button>
+        </form>
+      {% endif %}
+    </nav>
+  </header>
+
+  <main class="container">
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        {% for category, msg in messages %}
+          <div class="flash {{ category }}">{{ msg }}</div>
+        {% endfor %}
+      {% endif %}
+    {% endwith %}
+
+    {% block content %}{% endblock %}
+  </main>
+
+  <footer class="footer">
+    <span>NetInv • Kali 2026.1 • nmap -sT/-sV/NSE • учёт Palo Alto SYN Flood / SYN Cookies</span>
+  </footer>
+</body>
+</html>

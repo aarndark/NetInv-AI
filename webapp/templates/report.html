@@ -1,0 +1,262 @@
+{% extends "base.html" %}
+{% block title %}Отчёт — {{ target.name }}{% endblock %}
+{% block content %}
+
+{# Макрос отрисовки таблицы отчёта (используется для обеих секций) #}
+{% macro report_table(section_rows) %}
+  <div class="table-scroll">
+  <table class="tbl report">
+    <thead>
+      <tr>
+        <th>Дата сканирования</th>
+        <th>IP-адрес</th>
+        <th>Источник</th>
+        <th>Доменное имя</th>
+        <th>Описание</th>
+        <th>Открытые порты<br><span class="hint">(с учётом SYN Cookies)</span></th>
+        <th>Опубликованные сервисы</th>
+        <th>Web-ресурсы</th>
+        <th>Первое обнаружение</th>
+        <th>Предыдущее сканирование</th>
+        <th>Отличия от предыдущего</th>
+        <th>Позапрошлое сканирование</th>
+        <th>Отличия от позапрошлого</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for r in section_rows %}
+      {# Подсветка строки: новый IP (требование 5) / пропавший IP (требование 6) #}
+      <tr class="{% if r.hl_new_ip %}ip-new{% elif r.hl_gone_ip %}ip-gone{% endif %}">
+        <td class="nowrap">{{ r.last_scanned_at|fmtdate }}</td>
+        <td class="nowrap">
+          {# Подсветка самого IP-адреса #}
+          <strong class="{% if r.hl_new_ip %}ip-tag-new{% elif r.hl_gone_ip %}ip-tag-gone{% endif %}">{{ r.ip }}</strong>
+          {% if r.hl_new_ip %}<br><span class="badge ip-badge-new" title="IP не было при прошлом сканировании">новый IP</span>{% endif %}
+          {% if r.hl_gone_ip %}<br><span class="badge ip-badge-gone" title="IP был при прошлом сканировании, но отсутствует в текущем">IP не найден</span>{% endif %}
+          {% if r.alive_no_ports %}<br><span class="port suspect" title="Узел живой, но открытых портов не обнаружено">alive_no_ports</span>{% endif %}
+        </td>
+        {# Источник IP: диапазон (CIDR) / домен / поддомен + домен-источник #}
+        <td class="nowrap">
+          <span class="src-badge src-{{ r.source }}">{{ r.source_label }}</span>
+          {% if r.source_domain %}<br><span class="hint">{{ r.source_domain }}</span>{% endif %}
+        </td>
+        <td>{{ r.hostname or '—' }}</td>
+        {# Требование 4: редактируемое «Описание» в привязке к IP (AJAX) #}
+        <td class="note-cell">
+          <input type="text" class="note-input" value="{{ r.note }}"
+                 data-ip="{{ r.ip }}" placeholder="—"
+                 title="Описание сохраняется в привязке к IP-адресу">
+          <span class="note-status"></span>
+        </td>
+        <td>
+          {% for p in r.ports_disp %}
+            {# Подсветка новых портов (требование 7) #}
+            <span class="port {{ 'suspect' if '[syncookie' in p or '[filtered' in p else 'ok' }}{% if r.hl_new_ports %} port-new{% endif %}">{{ p }}</span>
+          {% endfor %}
+          {% if r.advanced_note %}
+            <details class="adv-note">
+              <summary>advanced check</summary>
+              <pre>{{ r.advanced_note }}</pre>
+            </details>
+          {% endif %}
+        </td>
+        <td class="svc">
+          {% for s in r.services_disp %}<div>{{ s }}</div>{% endfor %}
+        </td>
+        <td class="web">
+          {% for w in r.web_disp %}<div>{{ w }}</div>{% endfor %}
+        </td>
+        <td class="nowrap">{{ r.first_seen|fmtdate }}</td>
+        <td class="nowrap">{{ r.prev_scanned_at|fmtdate }}</td>
+        {# Подсветка примечания, если есть новые/пропавшие порты или смена присутствия #}
+        <td class="diff {% if r.hl_new_ip %}diff-new{% elif r.hl_gone_ip %}diff-gone{% elif r.hl_new_ports %}diff-portnew{% elif r.hl_gone_ports %}diff-portgone{% endif %}">{{ r.diff_prev_text }}</td>
+        <td class="nowrap">{{ r.prev2_scanned_at|fmtdate }}</td>
+        <td class="diff">{{ r.diff_prev2_text }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+{% endmacro %}
+
+<section class="card">
+  <div class="report-head">
+    <div>
+      <h2>Отчёт по объекту: {{ target.name }}</h2>
+      <p class="muted"><code>{{ target.cidr }}</code> — {{ target.description or 'без описания' }}</p>
+    </div>
+    <div class="report-actions">
+      {# Требование 11/12: переключатель класса статистики #}
+      <div class="class-switch">
+        <a class="btn {{ 'primary' if scan_class=='main' else '' }}"
+           href="{{ url_for('report', target_id=target.id, scan_class='main') }}">Основное</a>
+        <a class="btn {{ 'primary' if scan_class=='advanced' else '' }}"
+           href="{{ url_for('report', target_id=target.id, scan_class='advanced') }}">Расширенное</a>
+      </div>
+      {% if scan_class == 'main' %}
+        <form method="post" action="{{ url_for('start_main_scan', target_id=target.id) }}" class="inline-scan">
+          <button type="submit" class="btn primary"
+                  title="Основной скан: обход SYN-защиты (-sT), balanced, NSE, web, alive_no_ports">▶ Основной скан</button>
+        </form>
+      {% else %}
+        <form method="post" action="{{ url_for('start_advanced_scan', target_id=target.id) }}" class="inline-scan">
+          <input type="hidden" name="profile" value="stealth">
+          <select name="syn_mode" title="Режим по отношению к защите SYN Flood / SYN Cookies">
+            <option value="evasion" selected>обход SYN-защиты (-sT)</option>
+            <option value="direct">без обхода (-sS, root)</option>
+          </select>
+          <label class="chk" title="Доп. перепроверка узлов alive_no_ports (nmap -p- / --reason / -sU)">
+            <input type="checkbox" name="advanced_anp"> alive_no_ports advanced check
+          </label>
+          <button type="submit" class="btn primary">▶ Расширенный скан</button>
+        </form>
+      {% endif %}
+      <a class="btn" href="{{ url_for('report_csv', target_id=target.id, scan_class=scan_class) }}">⬇ CSV</a>
+    </div>
+  </div>
+
+  <p class="muted">
+    Класс статистики:
+    {% if scan_class == 'main' %}<strong>основное сканирование</strong>{% else %}<strong>расширенное сканирование</strong>{% endif %}.
+    «Отличия от предыдущего» сравниваются только с прошлыми результатами этого же класса.
+  </p>
+
+  {# Привязанные к объекту домены (дополнительно к обязательному CIDR) #}
+  {% if domains %}
+  <p class="muted small">
+    Привязанные домены ({{ domains|length }}):
+    {% for d in domains %}<code>{{ d.domain }}</code>{% if not loop.last %}, {% endif %}{% endfor %}.
+    Домены 2-го уровня обогащаются поиском поддоменов; домены 3+ уровня — резолвом IP.
+  </p>
+  {% endif %}
+
+  {% if not rows %}
+    <p class="muted">Результатов пока нет. Запустите сканирование и обновите страницу.</p>
+  {% else %}
+
+  {# Требование 10: секция 1 — гарантированно «живые» хосты #}
+  <h3 class="section-title live">✅ Гарантированно «живые» хосты ({{ live_rows|length }})</h3>
+  <p class="muted small">Узлы с хотя бы одним подтверждённым сервисом (полное TCP-рукопожатие -sT + сервис).</p>
+  {% if live_rows %}
+    {{ report_table(live_rows) }}
+  {% else %}
+    <p class="muted">Нет хостов с подтверждёнными сервисами.</p>
+  {% endif %}
+
+  {# Требование 10: секция 2 — возможные артефакты защиты Palo Alto #}
+  <h3 class="section-title palo">⚠ Возможные артефакты защиты Palo Alto ({{ palo_rows|length }})</h3>
+  <p class="muted small">
+    Узлы без подтверждённых сервисов: только syncookie_suspect-порты, alive_no_ports
+    либо пропавшие IP. Может генерироваться SYN-cookie proxy на Palo Alto — требует ручной верификации.
+  </p>
+  {% if palo_rows %}
+    {{ report_table(palo_rows) }}
+  {% else %}
+    <p class="muted">Нет узлов-кандидатов на артефакты Palo Alto.</p>
+  {% endif %}
+
+  {# Найденные поддомены (разведка dnsmap/dnsenum/dnsrecon + резолв) #}
+  {% if subdomains %}
+  <h3 class="section-title">🔎 Поддомены ({{ subdomains|length }})</h3>
+  <p class="muted small">
+    Результаты DNS-разведки привязанных доменов 2-го уровня и резолва доменов 3+ уровня.
+    Найденные IP добавлены к сканированию и отражены в таблице выше (столбец «Источник»).
+  </p>
+  <div class="table-scroll">
+  <table class="tbl">
+    <thead>
+      <tr><th>Родительский домен</th><th>Поддомен / имя</th><th>IP-адрес</th><th>Утилита</th><th>Найдено</th></tr>
+    </thead>
+    <tbody>
+    {% for s in subdomains %}
+      <tr>
+        <td><code>{{ s.parent }}</code></td>
+        <td><code>{{ s.subdomain }}</code></td>
+        <td>{{ s.ip or '—' }}</td>
+        <td><span class="badge">{{ s.tool or '—' }}</span></td>
+        <td class="nowrap">{{ s.found_at|fmtdate }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% endif %}
+
+  <p class="legend">
+    <span class="port ok">порт</span> — подтверждён полным TCP-рукопожатием (-sT) и/или сервисом.
+    <span class="src-badge src-domain">домен</span> / <span class="src-badge src-subdomain">поддомен</span> / <span class="src-badge src-cidr">диапазон (CIDR)</span> — источник IP-адреса.<br>
+    <span class="port suspect">порт [syncookie_suspect]</span> — открыт по рукопожатию, но без подтверждённого
+    сервиса: возможный артефакт SYN-cookie proxy на Palo Alto.<br>
+    <span class="port port-new">порт</span> — новый порт/сервис относительно прошлого сканирования.
+    <span class="ip-tag-new">IP</span> — новый IP; <span class="ip-tag-gone">IP</span> — IP не найден (был ранее).
+  </p>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h3>История запусков по объекту
+    ({% if scan_class == 'main' %}основное{% else %}расширенное{% endif %})</h3>
+  {% if runs %}
+  <table class="tbl">
+    <thead><tr><th>#</th><th>Начало</th><th>Окончание</th><th>Класс</th><th>Статус</th><th>Узлов up</th><th>Краткие опции</th><th>Команда nmap</th></tr></thead>
+    <tbody>
+    {% for r in runs %}
+      <tr>
+        <td>{{ r.id }}</td>
+        <td>{{ r.started_at|fmtdate }}</td>
+        <td>{{ r.finished_at|fmtdate }}</td>
+        <td>
+          {% if r.scan_class == 'main' %}<span class="badge cls-main">основное</span>
+          {% else %}<span class="badge cls-adv">расширенное</span>{% endif %}
+        </td>
+        <td><span class="badge {{ r.status }}">{{ r.status }}</span></td>
+        <td>{{ r.hosts_up }}</td>
+        {# Требование 12: для расширенного — краткие опции #}
+        <td class="small">
+          {% if r.scan_class == 'advanced' and r.options_json %}{{ r.options_json|optsbrief }}
+          {% else %}<span class="muted">пресет «основное»</span>{% endif %}
+        </td>
+        <td><code class="cmd">{{ r.nmap_args }}</code></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+    <p class="muted">Запусков ещё не было.</p>
+  {% endif %}
+</section>
+
+{# Требование 4: сохранение «Описания» по IP через AJAX #}
+<script>
+document.querySelectorAll('.note-input').forEach(function (inp) {
+  var saveNote = function () {
+    var ip = inp.getAttribute('data-ip');
+    var status = inp.parentElement.querySelector('.note-status');
+    var data = new URLSearchParams();
+    data.append('ip', ip);
+    data.append('note', inp.value);
+    status.textContent = '…';
+    fetch("{{ url_for('set_note', target_id=target.id) }}", {
+      method: 'POST',
+      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+      body: data.toString()
+    }).then(function (resp) { return resp.json(); })
+      .then(function (j) {
+        status.textContent = j.ok ? '✓' : '✗';
+        status.className = 'note-status ' + (j.ok ? 'ok' : 'err');
+        setTimeout(function () { status.textContent = ''; }, 1500);
+      })
+      .catch(function () {
+        status.textContent = '✗';
+        status.className = 'note-status err';
+      });
+  };
+  // Сохраняем при потере фокуса и по Enter
+  inp.addEventListener('change', saveNote);
+  inp.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') { e.preventDefault(); inp.blur(); }
+  });
+});
+</script>
+
+{% endblock %}

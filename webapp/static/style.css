@@ -1,0 +1,156 @@
+:root{
+  --bg:#0f1419; --panel:#1a212b; --panel2:#222c38; --line:#2c3847;
+  --txt:#e6edf3; --muted:#8b97a6; --accent:#2dd4bf; --accent2:#38bdf8;
+  --ok:#22c55e; --warn:#f59e0b; --danger:#ef4444;
+}
+*{box-sizing:border-box}
+body{margin:0;font-family:"Segoe UI",system-ui,-apple-system,sans-serif;
+  background:var(--bg);color:var(--txt);font-size:14px;line-height:1.5}
+code{font-family:"JetBrains Mono","Consolas",monospace;color:var(--accent2)}
+
+.topbar{display:flex;justify-content:space-between;align-items:center;
+  padding:14px 24px;background:linear-gradient(90deg,#11161d,#1a212b);
+  border-bottom:1px solid var(--line)}
+.brand{font-size:18px;font-weight:700;letter-spacing:.3px;color:var(--txt);text-decoration:none}
+.brand:hover{color:var(--accent)}
+.brand .sub{font-size:11px;color:var(--muted);font-weight:400;margin-left:8px}
+.topbar nav{display:flex;align-items:center;gap:0}
+.topbar nav a{color:var(--muted);text-decoration:none;margin-left:18px;font-weight:500}
+.topbar nav a:hover{color:var(--accent)}
+.nav-user{color:var(--accent2);font-size:12px;margin-left:18px}
+.nav-logout{display:inline;margin-left:14px}
+.btn.link{background:none;border:none;color:var(--muted);padding:0;font-size:13px;cursor:pointer}
+.btn.link:hover{color:var(--accent)}
+
+.container{max-width:1500px;margin:0 auto;padding:22px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;
+  padding:18px 20px;margin-bottom:20px}
+.card h2{margin:0 0 14px;font-size:17px}
+.card h3{margin:0 0 12px;font-size:15px;color:var(--muted)}
+.muted{color:var(--muted)}
+.hint{font-size:10px;color:var(--muted);font-weight:400}
+
+.grid-form{display:grid;grid-template-columns:1fr 1fr auto;gap:12px;align-items:end}
+.grid-form label{display:flex;flex-direction:column;font-size:12px;color:var(--muted);gap:5px}
+.grid-form label.wide{grid-column:1 / 3}
+input[type=text],select{background:var(--panel2);border:1px solid var(--line);
+  color:var(--txt);padding:8px 10px;border-radius:8px;font-size:13px}
+input[type=text]:focus,select:focus{outline:none;border-color:var(--accent)}
+
+.btn{background:var(--panel2);border:1px solid var(--line);color:var(--txt);
+  padding:8px 14px;border-radius:8px;cursor:pointer;font-size:13px;text-decoration:none;
+  display:inline-block}
+.btn:hover{border-color:var(--accent)}
+.btn.primary{background:var(--accent);color:#06231f;border-color:var(--accent);font-weight:600}
+.btn.danger{background:transparent;color:var(--danger);border-color:#5b2630;padding:6px 10px}
+.btn.danger:hover{background:#3a1a1f}
+
+.tbl{width:100%;border-collapse:collapse;font-size:13px}
+.tbl th,.tbl td{padding:9px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+.tbl th{color:var(--muted);font-weight:600;font-size:12px;background:var(--panel2)}
+.tbl tbody tr:hover{background:#1e2733}
+.tbl a{color:var(--accent2);text-decoration:none}
+.tbl a:hover{text-decoration:underline}
+.nowrap{white-space:nowrap}
+
+.inline-scan{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.chk{display:flex;align-items:center;gap:4px;font-size:11px;color:var(--muted)}
+
+.badge{padding:2px 9px;border-radius:20px;font-size:11px;font-weight:600}
+.badge.running{background:#33280a;color:var(--warn)}
+.badge.done{background:#0c2e1a;color:var(--ok)}
+.badge.error{background:#3a1a1f;color:var(--danger)}
+
+.flash{padding:10px 14px;border-radius:8px;margin-bottom:14px;font-size:13px}
+.flash.ok{background:#0c2e1a;color:#7ee2a8;border:1px solid #16432a}
+.flash.error{background:#3a1a1f;color:#f3a0a8;border:1px solid #5b2630}
+
+.report-head{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px;gap:16px}
+.report-actions{display:flex;gap:10px;align-items:center}
+.table-scroll{overflow-x:auto}
+.tbl.report td{font-size:12px}
+.tbl.report .svc div,.tbl.report .web div{padding:1px 0}
+.tbl.report .web{max-width:280px;word-break:break-all}
+.tbl.report .diff{max-width:320px;color:#cbd5e1}
+.cmd{font-size:11px;color:var(--muted);word-break:break-all}
+
+.port{display:inline-block;padding:2px 7px;margin:2px 3px 2px 0;border-radius:6px;
+  font-size:11px;font-family:"JetBrains Mono",monospace}
+.port.ok{background:#0c2e1a;color:#7ee2a8;border:1px solid #16432a}
+.port.suspect{background:#33280a;color:var(--warn);border:1px solid #5a4410}
+
+.legend{margin-top:14px;font-size:11px;color:var(--muted)}
+.legend .port{vertical-align:middle}
+
+.adv-note{margin-top:6px;font-size:11px}
+.adv-note summary{cursor:pointer;color:var(--warn);user-select:none}
+.adv-note pre{white-space:pre-wrap;word-break:break-word;margin:6px 0 0;padding:8px;
+  background:#0e1525;border:1px solid var(--line);border-radius:6px;color:#cbd5e1;
+  font-family:"JetBrains Mono",monospace;font-size:10.5px;max-width:340px}
+
+.footer{text-align:center;color:var(--muted);font-size:11px;padding:18px;border-top:1px solid var(--line)}
+
+/* ---- классы сканирования (main/advanced) ---- */
+.badge.cls-main{background:#0b2a3a;color:#7dd3fc;border:1px solid #14405a}
+.badge.cls-adv{background:#2a1a3a;color:#d8b4fe;border:1px solid #432a5a}
+.small{font-size:11px}
+.muted.small{font-size:11px}
+
+/* ---- два класса запуска на стартовой ---- */
+.main-scan{align-items:center;gap:8px;margin-bottom:6px}
+.adv-scan{margin-top:6px}
+.adv-scan summary{cursor:pointer;color:var(--accent2);font-size:12px;user-select:none}
+.adv-scan .inline-scan{margin-top:8px}
+.class-switch{display:inline-flex;gap:6px;margin-right:8px}
+
+/* ---- управление доменами объекта ---- */
+.domain-list{list-style:none;margin:0 0 4px;padding:0}
+.domain-list li{display:flex;align-items:center;gap:4px;margin:2px 0}
+.inline-del{display:inline;margin:0}
+.btn-x{background:none;border:none;color:var(--muted);cursor:pointer;font-size:12px;padding:0 2px;line-height:1}
+.btn-x:hover{color:#e74c3c}
+.src-badge{display:inline-block;padding:1px 6px;border-radius:6px;font-size:11px;border:1px solid var(--border)}
+.src-cidr{color:var(--muted)}
+.src-domain{color:var(--accent2)}
+.src-subdomain{color:#27ae60}
+
+/* ---- секции отчёта (живые / Palo Alto) — требование 10 ---- */
+.section-title{margin:18px 0 4px;font-size:14px;padding:6px 10px;border-radius:8px}
+.section-title.live{background:#0c2e1a;color:#7ee2a8;border:1px solid #16432a}
+.section-title.palo{background:#33280a;color:#fcd34d;border:1px solid #5a4410}
+
+/* ---- подсветка нового IP (требование 5) / пропавшего IP (требование 6) ---- */
+tr.ip-new{background:rgba(34,197,94,.10)}
+tr.ip-gone{background:rgba(239,68,68,.10)}
+.ip-tag-new{color:#7ee2a8;text-decoration:underline dotted}
+.ip-tag-gone{color:#f3a0a8;text-decoration:line-through}
+.badge.ip-badge-new{background:#0c2e1a;color:#7ee2a8;border:1px solid #16432a}
+.badge.ip-badge-gone{background:#3a1a1f;color:#f3a0a8;border:1px solid #5b2630}
+
+/* ---- подсветка новых портов (требование 7) ---- */
+.port.port-new{background:#10233a;color:#93c5fd;border:1px solid #1e4976;
+  box-shadow:0 0 0 1px #38bdf8 inset}
+
+/* ---- подсветка примечаний «Отличия» (требования 5–8) ---- */
+.diff-new{color:#7ee2a8;font-weight:600}
+.diff-gone{color:#f3a0a8;font-weight:600}
+.diff-portnew{color:#93c5fd}
+.diff-portgone{color:#fcd34d}
+
+/* ---- редактируемое поле «Описание» (требование 4) ---- */
+.note-cell{min-width:150px}
+.note-input{width:140px;background:var(--panel2);border:1px solid var(--line);
+  color:var(--txt);padding:5px 7px;border-radius:6px;font-size:12px}
+.note-input:focus{outline:none;border-color:var(--accent)}
+.note-status{margin-left:5px;font-size:12px}
+.note-status.ok{color:var(--ok)}
+.note-status.err{color:var(--danger)}
+
+/* ---- форма входа (требование 13) ---- */
+.login-card{max-width:420px;margin:40px auto}
+.login-form{display:flex;flex-direction:column;gap:14px;margin-top:8px}
+.login-form label{display:flex;flex-direction:column;font-size:12px;color:var(--muted);gap:6px}
+.login-form input{background:var(--panel2);border:1px solid var(--line);color:var(--txt);
+  padding:10px 12px;border-radius:8px;font-size:14px}
+.login-form input:focus{outline:none;border-color:var(--accent)}
+.login-form .btn{margin-top:4px}

@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}История запусков{% endblock %}
+{% block content %}
+<section class="card">
+  <h2>История всех запусков сканирования</h2>
+  {% if not runs %}
+    <p class="muted">Запусков ещё не было.</p>
+  {% else %}
+  <table class="tbl">
+    <thead>
+      <tr><th>#</th><th>Объект</th><th>CIDR</th><th>Начало</th><th>Окончание</th>
+          <th>Класс</th><th>Статус</th><th>Узлов up</th><th>Краткие опции</th><th>Команда</th></tr>
+    </thead>
+    <tbody>
+    {% for r in runs %}
+      <tr>
+        <td>{{ r.id }}</td>
+        <td><a href="{{ url_for('report', target_id=r.target_id, scan_class=r.scan_class) }}">{{ r.target_name }}</a></td>
+        <td><code>{{ r.target_cidr }}</code></td>
+        <td>{{ r.started_at|fmtdate }}</td>
+        <td>{{ r.finished_at|fmtdate }}</td>
+        <td>
+          {% if r.scan_class == 'main' %}<span class="badge cls-main">основное</span>
+          {% else %}<span class="badge cls-adv">расширенное</span>{% endif %}
+        </td>
+        <td><span class="badge {{ r.status }}">{{ r.status }}</span></td>
+        <td>{{ r.hosts_up }}</td>
+        <td class="small">
+          {% if r.scan_class == 'advanced' and r.options_json %}{{ r.options_json|optsbrief }}
+          {% else %}<span class="muted">пресет «основное»</span>{% endif %}
+        </td>
+        <td><code class="cmd">{{ r.nmap_args }}</code></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</section>
+{% endblock %}

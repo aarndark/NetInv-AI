@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+# =============================================================================
+#  netinv — единая точка запуска всей системы NetInv.
+#
+#  Использование:
+#    ./netinv                       Запустить web-приложение (по умолчанию,
+#                                    http://127.0.0.1:5000)
+#    ./netinv web [опции]           То же явно. Опции:
+#         --host 0.0.0.0  --port 8080
+#    ./netinv scan [опции nmap]     Разовый ПРОГОН всех активных объектов
+#                                    (обёртка над run_cron.py). Примеры опций:
+#         --syn-mode direct  --profile balanced  --full-ports  --extra-nse
+#    ./netinv scan --main           ОСНОВНОЙ скан (фиксированный пресет:
+#                                    обход SYN-защиты, balanced, NSE, web,
+#                                    alive_no_ports). Без параметров.
+#    ./netinv adduser               Создать/обновить локального пользователя
+#                                    NetInv (интерактивно, группа cpt).
+#    ./netinv install               Переустановить/обновить окружение.
+#    ./netinv update [источник]     Обновить NetInv до актуальной версии из
+#                                    локального архива netinv.tar.gz или каталога
+#                                    (с резервной копией, сохранением data.db и
+#                                    миграциями схемы). См. ./netinv update --help.
+#    ./netinv help                  Справка.
+#
+#  При первом запуске, если окружение .venv отсутствует, netinv автоматически
+#  вызовет install.sh (bootstrap).
+# =============================================================================
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
+c_inf=$'\033[0;36m'; c_off=$'\033[0m'
+
+bootstrap() {
+  if [[ ! -d ".venv" ]]; then
+    echo "${c_inf}[*]${c_off} Окружение не найдено — запускаю установку (install.sh) ..."
+    bash ./install.sh
+  fi
+}
+
+activate() {
+  # shellcheck disable=SC1091
+  source .venv/bin/activate
+}
+
+cmd="${1:-web}"
+case "$cmd" in
+  web|"")
+    [[ "$cmd" == "web" ]] && shift || true
+    bootstrap; activate
+    HOST="127.0.0.1"; PORT="5000"
+    # Разбор простых опций --host / --port
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --host) HOST="$2"; shift 2;;
+        --port) PORT="$2"; shift 2;;
+        *) echo "Неизвестная опция web: $1"; exit 1;;
+      esac
+    done
+    echo "${c_inf}[*]${c_off} Запуск web-приложения на http://${HOST}:${PORT}"
+    cd webapp
+    NETINV_HOST="$HOST" NETINV_PORT="$PORT" exec python app.py
+    ;;
+
+  scan)
+    shift
+    bootstrap; activate
+    echo "${c_inf}[*]${c_off} Разовый прогон всех активных объектов ..."
+    exec python run_cron.py "$@"
+    ;;
+
+  adduser|useradd)
+    shift || true
+    bootstrap; activate
+    echo "${c_inf}[*]${c_off} Создание/обновление локального пользователя NetInv ..."
+    exec python scanner/manage_users.py add "$@"
+    ;;
+
+  install)
+    exec bash ./install.sh
+    ;;
+
+  update|upgrade)
+    shift || true
+    exec bash ./update.sh "$@"
+    ;;
+
+  help|-h|--help)
+    sed -n '4,26p' "$0" | sed 's/^#\s\?//'
+    ;;
+
+  *)
+    echo "Неизвестная команда: $cmd"
+    echo "Запустите: ./netinv help"
+    exit 1
+    ;;
+esac

@@ -1,0 +1,157 @@
+{% extends "base.html" %}
+{% block content %}
+
+<section class="card">
+  <h2>Добавить объект сканирования</h2>
+  <form method="post" action="{{ url_for('add_target') }}" class="grid-form">
+    <label>Имя объекта
+      <input type="text" name="name" placeholder="DMZ-сеть филиала" required>
+    </label>
+    <label>Подсеть / хост (CIDR)
+      <input type="text" name="cidr" placeholder="192.168.10.0/24 или 10.0.0.5" required>
+    </label>
+    <label class="wide">Описание
+      <input type="text" name="description" placeholder="Назначение, владелец, окно сканирования">
+    </label>
+    <button type="submit" class="btn primary">Добавить</button>
+  </form>
+</section>
+
+<section class="card">
+  <h2>Объекты ({{ targets|length }})</h2>
+  {% if not targets %}
+    <p class="muted">Объекты ещё не добавлены.</p>
+  {% else %}
+  <table class="tbl">
+    <thead>
+      <tr><th>ID</th><th>Имя</th><th>CIDR</th><th>Домены</th><th>Описание</th><th>Запуск сканирования</th><th></th></tr>
+    </thead>
+    <tbody>
+    {% for t in targets %}
+      <tr>
+        <td>{{ t.id }}</td>
+        <td><a href="{{ url_for('report', target_id=t.id) }}"><strong>{{ t.name }}</strong></a></td>
+        <td><code>{{ t.cidr }}</code></td>
+        <td>
+          {# Привязанные домены объекта (дополнительно к обязательному CIDR). #}
+          {% set tdomains = domains_by_target.get(t.id, []) %}
+          {% if tdomains %}
+            <ul class="domain-list">
+            {% for d in tdomains %}
+              <li>
+                <code>{{ d.domain }}</code>
+                <form method="post" action="{{ url_for('delete_domain', domain_id=d.id) }}"
+                      class="inline-del" onsubmit="return confirm('Отвязать домен {{ d.domain }}?');">
+                  <button type="submit" class="btn-x" title="Отвязать домен">✕</button>
+                </form>
+              </li>
+            {% endfor %}
+            </ul>
+          {% else %}
+            <span class="muted">—</span>
+          {% endif %}
+          <details class="adv-scan">
+            <summary>+ домен</summary>
+            <form method="post" action="{{ url_for('add_domain', target_id=t.id) }}" class="inline-scan">
+              <input type="text" name="domains" size="22"
+                     placeholder="example.ru, host.example.ru"
+                     title="Домен 2-го уровня (example.ru) — поиск поддоменов; домен 3+ уровня (host.example.ru) — только резолв IP. Можно несколько через пробел/запятую.">
+              <button type="submit" class="btn">Привязать</button>
+            </form>
+            <span class="hint">2-й уровень (example.ru) — поиск поддоменов; 3+ уровень — резолв IP</span>
+          </details>
+        </td>
+        <td class="muted">{{ t.description or '—' }}</td>
+        <td>
+          <!-- Требование 11: два класса сканирования -->
+          <!-- ОСНОВНОЙ скан: фиксированный пресет, одна кнопка, без параметров -->
+          <form method="post" action="{{ url_for('start_main_scan', target_id=t.id) }}" class="inline-scan main-scan">
+            <button type="submit" class="btn primary"
+                    title="Основной скан: обход SYN-защиты (-sT), balanced, NSE, web, alive_no_ports">
+              ▶ Основной скан
+            </button>
+            <span class="hint">фикс. пресет: обход SYN-защиты, balanced, NSE, web, alive_no_ports, обратный DNS (dig -x)</span>
+          </form>
+          <!-- РАСШИРЕННЫЙ скан: все параметры выбираемы -->
+          <details class="adv-scan">
+            <summary>Расширенный скан (настраиваемый)</summary>
+            <form method="post" action="{{ url_for('start_advanced_scan', target_id=t.id) }}" class="inline-scan">
+              <select name="syn_mode" title="Режим по отношению к защите SYN Flood / SYN Cookies">
+                <option value="evasion" selected>обход SYN-защиты (-sT)</option>
+                <option value="direct">без обхода (-sS, root)</option>
+              </select>
+              <select name="profile" title="Профиль таймингов под Palo Alto SYN Flood">
+                {% for p in profiles %}
+                  <option value="{{ p }}" {% if p=='stealth' %}selected{% endif %}>{{ p }}</option>
+                {% endfor %}
+              </select>
+              <input type="text" name="ports" placeholder="порты (опц.) 22,80,443" size="14">
+              <label class="chk" title="Top-1000 по умолчанию; галка — все 65535">
+                <input type="checkbox" name="full_ports"> all-ports
+              </label>
+              <label class="chk" title="Расширенные безопасные NSE-скрипты">
+                <input type="checkbox" name="extra_nse"> +NSE
+              </label>
+              <label class="chk" title="Анализ web-ресурсов">
+                <input type="checkbox" name="do_web" checked> web
+              </label>
+              <label class="chk" title="Доп. перепроверка узлов, которые живые, но без открытых портов (nmap -p- / --reason / -sU)">
+                <input type="checkbox" name="advanced_anp"> alive_no_ports advanced check
+              </label>
+              <label class="chk" title="Обратный DNS-запрос dig -x по каждому найденному IP; имя в поле «Доменное имя»">
+                <input type="checkbox" name="dig_rdns"> обратный DNS (dig -x)
+              </label>
+              <label class="chk" title="Brute-force перебор поддоменов словарём (dnsmap/dnsenum/dnsrecon). По умолчанию — быстрый/пассивный режим. Применяется к привязанным доменам 2-го уровня.">
+                <input type="checkbox" name="dns_brute"> Brute-force поддоменов
+              </label>
+              <button type="submit" class="btn">▶ Расширенный скан</button>
+            </form>
+          </details>
+        </td>
+        <td>
+          <form method="post" action="{{ url_for('delete_target', target_id=t.id) }}"
+                onsubmit="return confirm('Удалить объект и всю его историю?');">
+            <button type="submit" class="btn danger">✕</button>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>Последние запуски</h2>
+  {% if not runs %}
+    <p class="muted">Запусков ещё не было.</p>
+  {% else %}
+  <table class="tbl">
+    <thead>
+      <tr><th>#</th><th>Объект</th><th>CIDR</th><th>Начало</th><th>Класс</th><th>Статус</th><th>Узлов up</th><th>Опции</th></tr>
+    </thead>
+    <tbody>
+    {% for r in runs %}
+      <tr>
+        <td>{{ r.id }}</td>
+        <td><a href="{{ url_for('report', target_id=r.target_id, scan_class=r.scan_class) }}">{{ r.target_name }}</a></td>
+        <td><code>{{ r.target_cidr }}</code></td>
+        <td>{{ r.started_at|fmtdate }}</td>
+        <td>
+          {% if r.scan_class == 'main' %}<span class="badge cls-main">основное</span>
+          {% else %}<span class="badge cls-adv">расширенное</span>{% endif %}
+        </td>
+        <td><span class="badge {{ r.status }}">{{ r.status }}</span></td>
+        <td>{{ r.hosts_up }}</td>
+        <td class="muted small">
+          {% if r.scan_class == 'advanced' and r.options_json %}{{ r.options_json|optsbrief }}
+          {% else %}{{ r.profile }}{% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</section>
+
+{% endblock %}
