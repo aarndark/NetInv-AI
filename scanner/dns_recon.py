@@ -67,6 +67,31 @@ def is_apex_domain(domain):
     return domain_level(domain) == 2
 
 
+def domain_sort_key(domain):
+    """Ключ сортировки доменов «по уровням».
+
+    Порядок (по требованию):
+      1. Сначала домены 1-го уровня / TLD (.com, потом .org, потом .ru),
+      2. затем 2-го уровня (coffee.ru, gravity.ru, zoon.ru),
+      3. затем 3-го и ниже (alive.ya.ru, crimson.ya.ru, people.ya.ru, ...),
+      и так далее.
+
+    Внутри одного уровня сортируем по меткам СПРАВА НАЛЕВО
+    (сначала по TLD, затем по следующей метке и т.д.), чтобы
+    однотипные домены группировались (напр. все *.ya.ru рядом).
+
+    Возвращает кортеж (уровень, метки-в-обратном-порядке).
+    Применять как key= в sorted().
+    """
+    norm = (domain or "").strip().lower().rstrip(".")
+    labels = [p for p in norm.split(".") if p]
+    level = len(labels)
+    # Метки справа налево: TLD первым (для .com < .org < .ru и
+    # группировки по общему родительскому домену).
+    reversed_labels = tuple(reversed(labels))
+    return (level, reversed_labels)
+
+
 # ----------------------- резолв имён -----------------------
 
 def resolve_host(name, timeout=RESOLVE_TIMEOUT):

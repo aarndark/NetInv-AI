@@ -289,26 +289,47 @@ def report_csv(target_id):
     w = csv.writer(buf, delimiter=";")
     w.writerow([
         "Дата сканирования", "IP-адрес", "Источник", "Доменное имя", "Описание",
+        "Администраторы", "Контроль и защита",
         "Класс сканирования", "Присутствие",
         "Открытые порты (с учётом SYN Cookies)", "Опубликованные сервисы",
-        "Web-ресурсы", "Статус узла", "alive_no_ports advanced check",
+        "Web-ресурсы", "Уязвимости", "Статус узла", "alive_no_ports advanced check",
         "Первое обнаружение",
         "Дата предыдущего сканирования", "Отличия от предыдущего",
         "Дата позапрошлого сканирования", "Отличия от позапрошлого",
     ])
     class_label = "основное" if scan_class == "main" else "расширенное"
     presence_label = {"new": "новый IP", "gone": "IP не найден", "pres": ""}
+    ctrl_names = {"ctrl_cpt": "CPT", "ctrl_soc": "SOC",
+                  "ctrl_vulnscan": "сканер уязвимостей", "ctrl_waf": "WAF",
+                  "ctrl_ddos": "DDOS"}
     for r in rows:
         status_label = "alive_no_ports" if r.get("alive_no_ports") else "обычный"
         src_cell = r.get("source_label") or ""
         if r.get("source_domain"):
             src_cell = f"{src_cell} ({r['source_domain']})"
+        # «Контроль и защита» — список включённых флагов.
+        ctrl_cell = ", ".join(
+            label for key, label in ctrl_names.items() if r.get(key))
+        # «Уязвимости» — сводка по критичности + заголовки находок.
+        vc = r.get("vuln_counts", {})
+        vuln_summary = []
+        if vc.get("critical"):
+            vuln_summary.append(f"критичных: {vc['critical']}")
+        if vc.get("warning"):
+            vuln_summary.append(f"предупреждений: {vc['warning']}")
+        if vc.get("info"):
+            vuln_summary.append(f"инфо: {vc['info']}")
+        vuln_titles = [f"[{v.get('severity')}] {v.get('title')}"
+                       for v in r.get("vulns", [])]
+        vuln_cell = "; ".join(vuln_summary)
+        if vuln_titles:
+            vuln_cell += " | " + " | ".join(vuln_titles)
         w.writerow([
             r["last_scanned_at"], r["ip"], src_cell, r["hostname"] or "",
-            r.get("note") or "",
+            r.get("note") or "", r.get("admins") or "", ctrl_cell,
             class_label, presence_label.get(r.get("presence"), ""),
             " | ".join(r["ports_disp"]), " | ".join(r["services_disp"]),
-            " | ".join(r["web_disp"]), status_label,
+            " | ".join(r["web_disp"]), vuln_cell, status_label,
             r.get("advanced_note") or "",
             r["first_seen"] or "",
             r["prev_scanned_at"] or "", r["diff_prev_text"],
@@ -355,6 +376,116 @@ def set_note(target_id):
     return jsonify({"ok": True, "ip": ip, "note": note})
 
 
+# ----------------------- атрибуты IP: Администраторы / Контроль и защита (AJAX) -
+
+@app.route("/attrs/<int:target_id>", methods=["POST"])
+@login_required
+def set_attrs(target_id):
+    """Сохранить «Администраторы» и/или флаги «Контроль и защита» по IP
+    (AJAX). Требование 4. Передаются только изменённые поля."""
+    if not db.get_target(target_id):
+        abort(404)
+    ip = (request.form.get("ip") or "").strip()
+    if not ip:
+        return jsonify({"ok": False, "error": "не указан IP"}), 400
+    kwargs = {}
+    if "admins" in request.form:
+        kwargs["admins"] = request.form.get("admins") or ""
+    # Флаги контроля и защиты (любые из набора) — значение "1"/"0".
+    for f in db.CTRL_FLAGS:
+        if f in request.form:
+            kwargs[f] = request.form.get(f) in ("1", "on", "true", "True")
+    if not kwargs:
+        return jsonify({"ok": False, "error": "нет полей для сохранения"}), 400
+    db.set_ip_attributes(target_id, ip, **kwargs)
+    return jsonify({"ok": True, "ip": ip})
+
+
+# ----------------------- подгрузка таблицы по запуску (AJAX-фрагмент) ----------
+
+@app.route("/run/<int:run_id>/rows")
+@login_required
+def run_rows(run_id):
+    """Требование 3: по клику на строку «Истории запусков» вернуть HTML-фрагмент
+    с таблицей результатов именно этого запуска (узлы/порты/сервисы/web/
+    уязвимости)."""
+    run = db.get_run(run_id)
+    if not run:
+        abort(404)
+    target = db.get_target(run["target_id"])
+    rows = _build_run_rows(run)
+    return render_template("_run_rows.html", rows=rows, run=run, target=target)
+
+
+def _build_run_rows(run):
+    """Строки таблицы по КОНКРЕТНОМУ запуску (а не по сводному состоянию).
+    Используется для подгрузки результатов из истории (требование 3)."""
+    target_id = run["target_id"]
+    run_id = run["id"]
+    notes = db.get_ip_notes(target_id)
+    attrs = db.get_ip_attributes(target_id)
+    origins = db.get_ip_origins(target_id)
+    rows = []
+    for host in db.hosts_for_run(run_id):
+        ip = host["ip"]
+        ports_disp, services_disp, web_disp = [], [], []
+        vulns, vuln_counts = [], {"critical": 0, "warning": 0, "info": 0}
+        for v in db.vulns_for_host(host["id"]):
+            vulns.append(v)
+            vuln_counts[v.get("severity", "info")] = \
+                vuln_counts.get(v.get("severity", "info"), 0) + 1
+        for p in db.ports_for_host(host["id"]):
+            conf = p.get("confidence", "")
+            tag = "" if conf == "confirmed" else f" [{conf}]"
+            ports_disp.append(f"{p['port']}/{p['proto']}{tag}")
+            svc = " ".join(x for x in [p.get("service"), p.get("product"),
+                                       p.get("version")] if x).strip()
+            if svc:
+                services_disp.append(f"{p['port']}: {svc}")
+        for wres in db.webres_for_host(host["id"]):
+            web_disp.append(
+                f"{wres['url']} [{wres.get('status_code')}] "
+                f"{wres.get('server') or ''}".strip())
+        ip_attr = attrs.get(ip, {})
+        origin = origins.get(ip, {})
+        src = origin.get("source") or "cidr"
+        src_domain = origin.get("domain") or ""
+        src_label = {"cidr": "диапазон (CIDR)", "domain": "домен",
+                     "subdomain": "поддомен"}.get(src, src)
+        if vuln_counts["critical"]:
+            vuln_max = "critical"
+        elif vuln_counts["warning"]:
+            vuln_max = "warning"
+        elif vuln_counts["info"]:
+            vuln_max = "info"
+        else:
+            vuln_max = None
+        rows.append({
+            "ip": ip,
+            "hostname": host.get("hostname") or src_domain or "",
+            "note": notes.get(ip, ""),
+            "last_scanned_at": host.get("scanned_at") or "",
+            "admins": ip_attr.get("admins", ""),
+            "ctrl_cpt": ip_attr.get("ctrl_cpt", 0),
+            "ctrl_soc": ip_attr.get("ctrl_soc", 0),
+            "ctrl_vulnscan": ip_attr.get("ctrl_vulnscan", 0),
+            "ctrl_waf": ip_attr.get("ctrl_waf", 0),
+            "ctrl_ddos": ip_attr.get("ctrl_ddos", 0),
+            "ports_disp": ports_disp or ["—"],
+            "services_disp": services_disp or ["—"],
+            "web_disp": web_disp or ["—"],
+            "vulns": vulns,
+            "vuln_counts": vuln_counts,
+            "vuln_max": vuln_max,
+            "alive_no_ports": bool(host.get("alive_no_ports")),
+            "advanced_note": host.get("advanced_note") or "",
+            "source": src,
+            "source_label": src_label,
+            "source_domain": src_domain,
+        })
+    return rows
+
+
 # ----------------------- сборка строк отчёта -----------------------
 
 def _build_report_rows(target_id, scan_class="main"):
@@ -362,11 +493,14 @@ def _build_report_rows(target_id, scan_class="main"):
     в рамках класса сканирования scan_class."""
     states = db.report_rows(target_id, scan_class)
     notes = db.get_ip_notes(target_id)
+    attrs = db.get_ip_attributes(target_id)  # {ip: {admins, ctrl_*}}
     origins = db.get_ip_origins(target_id)   # {ip: {'source':..., 'domain':...}}
     rows = []
     for st in states:
         last_run = st.get("last_run_id")
         ports_disp, services_disp, web_disp = [], [], []
+        vulns = []
+        vuln_counts = {"critical": 0, "warning": 0, "info": 0}
         hostname = ""
         alive_no_ports = False
         advanced_note = ""
@@ -377,6 +511,10 @@ def _build_report_rows(target_id, scan_class="main"):
                 hostname = host.get("hostname") or ""
                 alive_no_ports = bool(host.get("alive_no_ports"))
                 advanced_note = host.get("advanced_note") or ""
+                for v in db.vulns_for_host(host["id"]):
+                    vulns.append(v)
+                    sev = v.get("severity", "info")
+                    vuln_counts[sev] = vuln_counts.get(sev, 0) + 1
                 for p in db.ports_for_host(host["id"]):
                     conf = p.get("confidence", "")
                     if conf == "confirmed":
@@ -391,6 +529,18 @@ def _build_report_rows(target_id, scan_class="main"):
                     web_disp.append(
                         f"{wres['url']} [{wres.get('status_code')}] "
                         f"{wres.get('server') or ''}".strip())
+
+        # Атрибуты IP: «Администраторы» и «Контроль и защита» (требование 4).
+        ip_attr = attrs.get(st["ip"], {})
+        # Самый высокий уровень критичности находок (для подсветки строки).
+        if vuln_counts["critical"]:
+            vuln_max = "critical"
+        elif vuln_counts["warning"]:
+            vuln_max = "warning"
+        elif vuln_counts["info"]:
+            vuln_max = "info"
+        else:
+            vuln_max = None
 
         flags = diff_engine.diff_flags(st.get("diff_prev"))
         presence = st.get("presence", "pres")
@@ -423,6 +573,17 @@ def _build_report_rows(target_id, scan_class="main"):
             "web_disp": web_disp or ["—"],
             "alive_no_ports": alive_no_ports,
             "advanced_note": advanced_note,
+            # Требование 4: атрибуты IP.
+            "admins": ip_attr.get("admins", ""),
+            "ctrl_cpt": ip_attr.get("ctrl_cpt", 0),
+            "ctrl_soc": ip_attr.get("ctrl_soc", 0),
+            "ctrl_vulnscan": ip_attr.get("ctrl_vulnscan", 0),
+            "ctrl_waf": ip_attr.get("ctrl_waf", 0),
+            "ctrl_ddos": ip_attr.get("ctrl_ddos", 0),
+            # Требование 5: уязвимости.
+            "vulns": vulns,
+            "vuln_counts": vuln_counts,
+            "vuln_max": vuln_max,
             "presence": presence,
             "is_live": is_live,
             "source": src,

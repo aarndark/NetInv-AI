@@ -39,5 +39,9 @@
   <footer class="footer">
     <span>NetInv • Kali 2026.1 • nmap -sT/-sV/NSE • учёт Palo Alto SYN Flood / SYN Cookies</span>
   </footer>
+
+  {# Требование 2: настройка ширины колонок перетягиванием #}
+  <script src="{{ url_for('static', filename='table-resize.js') }}"></script>
+  {% block scripts %}{% endblock %}
 </body>
 </html>

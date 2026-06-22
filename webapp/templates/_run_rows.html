@@ -1,0 +1,24 @@
+{# Требование 3: HTML-фрагмент с таблицей результатов КОНКРЕТНОГО запуска.
+   Подгружается через AJAX по клику на строку «Истории запусков».
+   Переиспользуем макрос report_table из report.html в режиме «только чтение». #}
+{% from "_report_macros.html" import report_table %}
+<div class="run-rows-block">
+  <div class="run-rows-head">
+    <h4>Результаты запуска #{{ run.id }}
+      <span class="hint">
+        ({% if run.scan_class == 'main' %}основное{% else %}расширенное{% endif %},
+        начат {{ run.started_at|fmtdate }}, узлов up: {{ run.hosts_up }})
+      </span>
+    </h4>
+    <p class="muted small">
+      Снимок результатов именно этого запуска (без сравнения с другими сканированиями).
+      Поля «Описание», «Администраторы» и «Контроль и защита» здесь только для чтения —
+      редактирование доступно в сводном отчёте выше.
+    </p>
+  </div>
+  {% if rows %}
+    {{ report_table(rows, tkey='run-' ~ run.id, editable=false) }}
+  {% else %}
+    <p class="muted">В этом запуске нет сохранённых узлов.</p>
+  {% endif %}
+</div>

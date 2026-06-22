@@ -7,6 +7,7 @@
 #    1. Проверяет, что система Debian-совместима (есть apt-get).
 #    2. Устанавливает системные пакеты: nmap, whatweb, curl, dnsutils (dig),
 #       dnsmap, dnsenum, dnsrecon (разведка поддоменов),
+#       nikto, wpscan, dalfox (базовая проверка web-уязвимостей, требование 5),
 #       python3, python3-venv, python3-pip (через apt-get).
 #    3. Создаёт изолированное Python-окружение (.venv) и ставит зависимости.
 #    4. Инициализирует базу данных SQLite.
@@ -51,7 +52,11 @@ PKGS=(nmap whatweb curl dnsutils python3 python3-venv python3-pip)
 # метапакеты; на чистом Debian могут отсутствовать). Сканер деградирует
 # корректно, если какой-то из них не установлен, поэтому их установка
 # не обязательна и не прерывает установку при ошибке.
-OPT_PKGS=(dnsmap dnsenum dnsrecon)
+# Сюда же входят утилиты базовой проверки web-уязвимостей (требование 5):
+# nikto, wpscan, dalfox. На Kali они доступны в репозиториях; на чистом
+# Debian часть из них может отсутствовать — сканер работает и без них
+# (уязвимости проверяются доступными средствами: curl, nmap http-скрипты).
+OPT_PKGS=(dnsmap dnsenum dnsrecon nikto wpscan dalfox)
 MISSING=()
 for p in "${PKGS[@]}"; do
   if ! dpkg -s "$p" >/dev/null 2>&1; then
@@ -105,6 +110,10 @@ command -v dig >/dev/null 2>&1 || warn "dig не найден — поле «Д�
 # Утилиты разведки поддоменов — опциональны; сканер работает и без них.
 for dtool in dnsmap dnsenum dnsrecon; do
   command -v "$dtool" >/dev/null 2>&1 || warn "$dtool не найден — поиск поддоменов этой утилитой будет пропущен (установите пакет $dtool)."
+done
+# Утилиты базовой проверки web-уязвимостей (требование 5) — тоже опциональны.
+for wtool in nikto wpscan dalfox; do
+  command -v "$wtool" >/dev/null 2>&1 || warn "$wtool не найден — углублённая проверка web-уязвимостей этой утилитой будет пропущена (базовые проверки curl/nmap работают всё равно)."
 done
 
 # --- 3. python venv + зависимости ---

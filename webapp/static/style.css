@@ -67,11 +67,30 @@ input[type=text]:focus,select:focus{outline:none;border-color:var(--accent)}
 
 .report-head{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px;gap:16px}
 .report-actions{display:flex;gap:10px;align-items:center}
-.table-scroll{overflow-x:auto}
-.tbl.report td{font-size:12px}
+
+/* Требование 2: горизонтальная прокрутка ВСЕГДА видима и доступна. */
+.table-scroll{overflow-x:scroll;overflow-y:visible;padding-bottom:2px}
+/* Заметная и удобная полоса прокрутки (WebKit + Firefox). */
+.table-scroll{scrollbar-width:auto;scrollbar-color:var(--accent2) var(--panel2)}
+.table-scroll::-webkit-scrollbar{height:14px}
+.table-scroll::-webkit-scrollbar-track{background:var(--panel2);border-radius:8px}
+.table-scroll::-webkit-scrollbar-thumb{background:var(--accent2);border-radius:8px;border:3px solid var(--panel2)}
+.table-scroll::-webkit-scrollbar-thumb:hover{background:var(--accent)}
+
+/* Требование 2: настраиваемая перетягиванием ширина колонок.
+   table-layout:fixed + явные ширины <th> позволяют задавать ширину
+   независимо от содержимого; min-width не даёт таблице схлопнуться. */
+.tbl.report{table-layout:fixed;min-width:1950px}
+.tbl.report th{position:relative}
+.tbl.report th .col-resizer{position:absolute;top:0;right:0;width:7px;height:100%;
+  cursor:col-resize;user-select:none;touch-action:none}
+.tbl.report th .col-resizer:hover,.tbl.report th .col-resizer.dragging{
+  background:var(--accent2)}
+.tbl.report.resizing{cursor:col-resize;user-select:none}
+.tbl.report td{font-size:12px;overflow:hidden;text-overflow:ellipsis}
 .tbl.report .svc div,.tbl.report .web div{padding:1px 0}
-.tbl.report .web{max-width:280px;word-break:break-all}
-.tbl.report .diff{max-width:320px;color:#cbd5e1}
+.tbl.report .web{word-break:break-all}
+.tbl.report .diff{color:#cbd5e1}
 .cmd{font-size:11px;color:var(--muted);word-break:break-all}
 
 .port{display:inline-block;padding:2px 7px;margin:2px 3px 2px 0;border-radius:6px;
@@ -154,3 +173,50 @@ tr.ip-gone{background:rgba(239,68,68,.10)}
   padding:10px 12px;border-radius:8px;font-size:14px}
 .login-form input:focus{outline:none;border-color:var(--accent)}
 .login-form .btn{margin-top:4px}
+
+/* ====== Требование 4: «Администраторы» и «Контроль и защита» ====== */
+.attr-cell{min-width:150px}
+.admins-input{width:140px;background:var(--panel2);border:1px solid var(--line);
+  color:var(--txt);padding:5px 7px;border-radius:6px;font-size:12px}
+.admins-input:focus{outline:none;border-color:var(--accent)}
+.ctrl-cell{min-width:120px}
+.ctrl-chk{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--muted);
+  margin:1px 0;cursor:pointer;white-space:nowrap}
+.ctrl-chk input{accent-color:var(--accent);cursor:pointer;margin:0}
+.ctrl-chk input:disabled{cursor:default}
+.ctrl-chk span{user-select:none}
+
+/* ====== Требование 5: столбец «Уязвимости» и подсветка критичности ====== */
+/* Подсветка строки с критичной уязвимостью (макс. оперативное реагирование). */
+tr.vuln-row-critical{background:rgba(239,68,68,.16);box-shadow:inset 3px 0 0 #ef4444}
+.vuln-cell{min-width:200px}
+.vuln-summary{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:2px}
+.vuln-badge{display:inline-block;padding:1px 7px;border-radius:6px;font-size:10.5px;
+  font-weight:600;white-space:nowrap}
+.vuln-badge.crit{background:#3a1418;color:#fca5a5;border:1px solid #7f1d1d}
+.vuln-badge.warn{background:#33280a;color:#fcd34d;border:1px solid #5a4410}
+.vuln-badge.info{background:#0b2a3a;color:#7dd3fc;border:1px solid #14405a}
+.vuln-details{margin-top:2px}
+.vuln-details>summary{cursor:pointer;color:var(--accent2);font-size:11px;user-select:none}
+.vuln-item{margin:6px 0;padding:6px 8px;border-radius:6px;border:1px solid var(--line);
+  background:#0e1525}
+.vuln-item.sev-critical{border-left:3px solid #ef4444}
+.vuln-item.sev-warning{border-left:3px solid #f59e0b}
+.vuln-item.sev-info{border-left:3px solid #38bdf8}
+.vuln-title{font-size:11.5px;font-weight:600;color:var(--txt);
+  display:flex;align-items:center;gap:6px}
+.vuln-dot{width:8px;height:8px;border-radius:50%;display:inline-block;flex:0 0 auto}
+.vuln-dot.sev-critical{background:#ef4444}
+.vuln-dot.sev-warning{background:#f59e0b}
+.vuln-dot.sev-info{background:#38bdf8}
+.vuln-detail{font-size:10.5px;color:#cbd5e1;margin-top:3px;word-break:break-word}
+.vuln-rec{font-size:10.5px;color:#7ee2a8;margin-top:3px;word-break:break-word}
+
+/* ====== Требование 3: кликабельные строки «Истории запусков» ====== */
+.runs-tbl tbody tr.run-row{cursor:pointer;transition:background .12s}
+.runs-tbl tbody tr.run-row:hover{background:rgba(56,189,248,.10)}
+.runs-tbl tbody tr.run-row.active{background:rgba(56,189,248,.18);
+  box-shadow:inset 3px 0 0 var(--accent)}
+#run-rows-panel{margin-top:14px}
+.run-rows-head h4{margin:0 0 2px;font-size:13px}
+.muted.err{color:var(--danger)}

@@ -31,6 +31,23 @@ def ip_sort_key(ip):
     except ValueError:
         return (1, ip)
 
+
+def domain_sort_key(domain):
+    """Ключ сортировки доменов «по уровням» (требование 1).
+
+    Сначала домены 1-го уровня / TLD (.com, потом .org, потом .ru),
+    затем 2-го уровня (coffee.ru, gravity.ru, zoon.ru), затем 3-го и ниже
+    (alive.ya.ru, crimson.ya.ru, ...) и так далее. Внутри уровня —
+    по меткам СПРАВА НАЛЕВО (TLD первым), чтобы однотипные
+    домены группировались (напр. все *.ya.ru рядом).
+
+    Дублируется в dns_recon.domain_sort_key — здесь оставлена
+    самодостаточная копия, чтобы db.py не зависел от модуля разведки.
+    """
+    norm = (domain or "").strip().lower().rstrip(".")
+    labels = [p for p in norm.split(".") if p]
+    return (len(labels), tuple(reversed(labels)))
+
 # Путь к файлу БД. Имя data.db — на случай переноса/публикации web-приложения.
 DB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
 DB_PATH = os.path.join(DB_DIR, "data.db")
@@ -197,6 +214,45 @@ CREATE TABLE IF NOT EXISTS ip_notes (
     UNIQUE(target_id, ip)
 );
 
+-- Требование 4: дополнительные атрибуты IP — «Администраторы» (свободный
+-- текст) и «Контроль и защита» (набор флагов: CPT, SOC, сканер уязвимостей,
+-- WAF, DDOS). Привязка к (target_id, ip), не зависит от класса сканирования и
+-- хранится между запусками (как ip_notes).
+CREATE TABLE IF NOT EXISTS ip_attributes (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    target_id       INTEGER NOT NULL REFERENCES targets(id) ON DELETE CASCADE,
+    ip              TEXT NOT NULL,
+    admins          TEXT NOT NULL DEFAULT '',  -- «Администраторы» (текст)
+    ctrl_cpt        INTEGER NOT NULL DEFAULT 0, -- Continuous Penetration Test
+    ctrl_soc        INTEGER NOT NULL DEFAULT 0, -- SOC-мониторинг
+    ctrl_vulnscan   INTEGER NOT NULL DEFAULT 0, -- сканер уязвимостей
+    ctrl_waf        INTEGER NOT NULL DEFAULT 0, -- WAF
+    ctrl_ddos       INTEGER NOT NULL DEFAULT 0, -- защита от DDOS
+    updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(target_id, ip)
+);
+
+-- Требование 5: выявленные уязвимости/наблюдения web-ресурсов в рамках
+-- конкретного запуска (привязка к hosts.id). Заполняется модулем webscan
+-- (curl/whatweb/nikto/nmap-http/wpscan/dalfox) + классификатором vuln_rules.
+CREATE TABLE IF NOT EXISTS vulns (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    host_id         INTEGER NOT NULL REFERENCES hosts(id) ON DELETE CASCADE,
+    url             TEXT,                       -- web-ресурс, к которому относится
+    -- severity: critical | warning | info — определяет подсветку.
+    --   critical — требует максимально оперативного реагирования
+    --              (админ-панели, тестовые разделы, RCE/SQLi/XSS, .git/.env/backup);
+    --   warning  — отсутствие security-headers, устаревшие версии;
+    --   info     — прочие наблюдения.
+    severity        TEXT NOT NULL DEFAULT 'info',
+    category        TEXT,                       -- admin_panel|secfile|headers|outdated|...
+    title           TEXT NOT NULL,              -- краткое название находки
+    detail          TEXT,                       -- подробности (что найдено)
+    recommendation  TEXT,                       -- авто-рекомендация по устранению
+    tool            TEXT,                       -- инструмент-источник
+    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- Локальные пользователи NetInv для авторизации в web-приложении.
 -- Заводятся install.sh при установке. Доступ разрешён только пользователям,
 -- состоящим в группе 'cpt' (in_cpt=1).
@@ -215,6 +271,8 @@ CREATE INDEX IF NOT EXISTS idx_runs_target ON scan_runs(target_id);
 CREATE INDEX IF NOT EXISTS idx_tdomains_target ON target_domains(target_id);
 CREATE INDEX IF NOT EXISTS idx_iporigin_target ON ip_origin(target_id);
 CREATE INDEX IF NOT EXISTS idx_subdomains_target ON discovered_subdomains(target_id);
+CREATE INDEX IF NOT EXISTS idx_ipattrs_target ON ip_attributes(target_id);
+CREATE INDEX IF NOT EXISTS idx_vulns_host ON vulns(host_id);
 """
 
 
@@ -367,18 +425,21 @@ def add_target_domain(target_id, domain):
 
 
 def list_target_domains(target_id):
+    """Домены объекта, отсортированные «по уровням» (требование 1)."""
     with connect() as c:
-        return [dict(r) for r in c.execute(
-            "SELECT * FROM target_domains WHERE target_id=? ORDER BY domain",
-            (target_id,))]
+        rows = [dict(r) for r in c.execute(
+            "SELECT * FROM target_domains WHERE target_id=?", (target_id,))]
+    rows.sort(key=lambda r: domain_sort_key(r["domain"]))
+    return rows
 
 
 def domains_for_target(target_id):
-    """Простой список доменных имён объекта."""
+    """Простой список доменных имён объекта (сортировка по уровням)."""
     with connect() as c:
-        return [r["domain"] for r in c.execute(
-            "SELECT domain FROM target_domains WHERE target_id=? ORDER BY domain",
-            (target_id,))]
+        domains = [r["domain"] for r in c.execute(
+            "SELECT domain FROM target_domains WHERE target_id=?", (target_id,))]
+    domains.sort(key=domain_sort_key)
+    return domains
 
 
 def delete_target_domain(domain_id):
@@ -447,10 +508,14 @@ def add_subdomain(target_id, parent, subdomain, ip=None, tool=None, last_run_id=
 
 
 def list_subdomains(target_id):
+    """Найденные поддомены, отсортированные «по уровням» (требование 1):
+    сначала по родительскому домену (по уровням), затем по самому
+    поддомену (тоже по уровням)."""
     with connect() as c:
         rows = [dict(r) for r in c.execute(
-            "SELECT * FROM discovered_subdomains WHERE target_id=? "
-            "ORDER BY parent, subdomain", (target_id,))]
+            "SELECT * FROM discovered_subdomains WHERE target_id=?", (target_id,))]
+    rows.sort(key=lambda r: (domain_sort_key(r["parent"]),
+                             domain_sort_key(r["subdomain"])))
     return rows
 
 
@@ -667,6 +732,105 @@ def set_ip_note(target_id, ip, note):
             "updated_at=datetime('now')",
             (target_id, ip, note))
         c.commit()
+
+
+# ----------------------- ip_attributes (Администраторы / Контроль и защита) -----
+
+# Имена флагов «Контроль и защита» (требование 4) — единый источник истины.
+CTRL_FLAGS = ("ctrl_cpt", "ctrl_soc", "ctrl_vulnscan", "ctrl_waf", "ctrl_ddos")
+
+
+def _empty_attrs():
+    a = {"admins": ""}
+    for f in CTRL_FLAGS:
+        a[f] = 0
+    return a
+
+
+def get_ip_attributes(target_id):
+    """Словарь {ip: {admins, ctrl_cpt, ctrl_soc, ...}} для всех IP объекта."""
+    with connect() as c:
+        out = {}
+        for r in c.execute(
+                "SELECT ip, admins, ctrl_cpt, ctrl_soc, ctrl_vulnscan, "
+                "ctrl_waf, ctrl_ddos FROM ip_attributes WHERE target_id=?",
+                (target_id,)):
+            out[r["ip"]] = {
+                "admins": r["admins"] or "",
+                "ctrl_cpt": int(r["ctrl_cpt"]),
+                "ctrl_soc": int(r["ctrl_soc"]),
+                "ctrl_vulnscan": int(r["ctrl_vulnscan"]),
+                "ctrl_waf": int(r["ctrl_waf"]),
+                "ctrl_ddos": int(r["ctrl_ddos"]),
+            }
+        return out
+
+
+def set_ip_attributes(target_id, ip, admins=None, **flags):
+    """Сохранить/обновить атрибуты IP. admins — текст «Администраторы»;
+    flags — любые из CTRL_FLAGS (0/1). Передавать можно частично:
+    указанные поля обновляются, неуказанные сохраняют прежнее значение."""
+    sets, vals = [], []
+    if admins is not None:
+        sets.append("admins=?")
+        vals.append(admins)
+    for f in CTRL_FLAGS:
+        if f in flags and flags[f] is not None:
+            sets.append(f"{f}=?")
+            vals.append(int(bool(flags[f])))
+    with _LOCK, connect() as c:
+        existing = c.execute(
+            "SELECT id FROM ip_attributes WHERE target_id=? AND ip=?",
+            (target_id, ip)).fetchone()
+        if existing:
+            if sets:
+                sets.append("updated_at=datetime('now')")
+                c.execute(
+                    f"UPDATE ip_attributes SET {', '.join(sets)} WHERE id=?",
+                    vals + [existing["id"]])
+        else:
+            row = _empty_attrs()
+            if admins is not None:
+                row["admins"] = admins
+            for f in CTRL_FLAGS:
+                if f in flags and flags[f] is not None:
+                    row[f] = int(bool(flags[f]))
+            c.execute(
+                "INSERT INTO ip_attributes(target_id, ip, admins, ctrl_cpt, "
+                "ctrl_soc, ctrl_vulnscan, ctrl_waf, ctrl_ddos) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (target_id, ip, row["admins"], row["ctrl_cpt"], row["ctrl_soc"],
+                 row["ctrl_vulnscan"], row["ctrl_waf"], row["ctrl_ddos"]))
+        c.commit()
+
+
+# ----------------------- vulns (уязвимости web-ресурсов) -----------------------
+
+def add_vuln(host_id, severity, category, title, detail="", recommendation="",
+             tool="", url=""):
+    """Сохранить одну находку уязвимости/наблюдения для узла (требование 5)."""
+    if severity not in ("critical", "warning", "info"):
+        severity = "info"
+    with _LOCK, connect() as c:
+        c.execute(
+            "INSERT INTO vulns(host_id, url, severity, category, title, detail, "
+            "recommendation, tool) VALUES (?,?,?,?,?,?,?,?)",
+            (host_id, url, severity, category, title, detail, recommendation, tool))
+        c.commit()
+
+
+# Порядок сортировки по критичности (critical → warning → info).
+_SEV_ORDER = {"critical": 0, "warning": 1, "info": 2}
+
+
+def vulns_for_host(host_id):
+    """Находки узла, отсортированные по критичности (сначала critical)."""
+    with connect() as c:
+        rows = [dict(r) for r in c.execute(
+            "SELECT * FROM vulns WHERE host_id=?", (host_id,))]
+    rows.sort(key=lambda r: (_SEV_ORDER.get(r.get("severity"), 9),
+                             r.get("category") or "", r.get("title") or ""))
+    return rows
 
 
 # ----------------------- users (авторизация) -----------------------

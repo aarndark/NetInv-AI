@@ -728,6 +728,28 @@ def run_scan(target_id, profile="stealth", ports=None, top_ports=DEFAULT_TOP_POR
                     if info:
                         db.add_webres(host_id, info["url"], info["status_code"],
                                       info["title"], info["server"], info["tech"])
+                        # Требование 5: базовая проверка на уязвимости.
+                        # Тяжёлые/активные инструменты (nikto/wpscan/dalfox)
+                        # запускаем только в расширенном скане (advanced),
+                        # чтобы не триггерить пороги Palo Alto в основном.
+                        heavy = (scan_class == "advanced")
+                        try:
+                            vfindings = webscan.assess_vulns(
+                                info["url"], server=info.get("server", ""),
+                                tech=info.get("tech", ""), heavy=heavy,
+                                log=print)
+                        except Exception as e:  # noqa: BLE001
+                            vfindings = []
+                            log_lines.append(
+                                f"assess_vulns({info['url']}) ошибка: {e}")
+                        for vf in vfindings:
+                            db.add_vuln(
+                                host_id, vf.get("severity", "info"),
+                                vf.get("category"), vf.get("title", ""),
+                                detail=vf.get("detail", ""),
+                                recommendation=vf.get("recommendation", ""),
+                                tool=vf.get("tool", ""),
+                                url=vf.get("url", info["url"]))
         # --- alive_no_ports advanced check -------------------------------
         # Если включена галочка/флаг, по каждому "живому без портов" узлу
         # выполняем углублённую перепроверку (3 команды nmap) и сохраняем

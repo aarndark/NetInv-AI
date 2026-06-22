@@ -1,0 +1,133 @@
+{# Макросы отрисовки таблицы отчёта NetInv.
+   Вынесены в отдельный файл (без extends), чтобы их можно было импортировать
+   как в сводный отчёт (report.html), так и во фрагмент истории запусков
+   (_run_rows.html) без ошибки «undefined target/scan_class». #}
+{# Макрос отрисовки таблицы отчёта (используется для обеих секций).
+   tkey — ключ таблицы для сохранения ширин колонок (требование 2);
+   editable — разрешать ли редактирование Описания/Атрибутов (только в сводном отчёте). #}
+{% macro report_table(section_rows, tkey='report', editable=true) %}
+  <div class="table-scroll">
+  <table class="tbl report" data-table-key="{{ tkey }}">
+    <thead>
+      <tr>
+        <th>Дата сканирования</th>
+        <th>IP-адрес</th>
+        <th>Источник</th>
+        <th>Доменное имя</th>
+        <th>Описание</th>
+        <th>Администраторы</th>
+        <th>Контроль и защита<br><span class="hint">CPT / SOC / сканер / WAF / DDOS</span></th>
+        <th>Открытые порты<br><span class="hint">(с учётом SYN Cookies)</span></th>
+        <th>Опубликованные сервисы</th>
+        <th>Web-ресурсы</th>
+        <th>Уязвимости</th>
+        <th>Первое обнаружение</th>
+        <th>Предыдущее сканирование</th>
+        <th>Отличия от предыдущего</th>
+        <th>Позапрошлое сканирование</th>
+        <th>Отличия от позапрошлого</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for r in section_rows %}
+      {# Подсветка строки: критичная уязвимость (требование 5) > новый/пропавший IP #}
+      <tr class="{% if r.vuln_max == 'critical' %}vuln-row-critical{% elif r.hl_new_ip %}ip-new{% elif r.hl_gone_ip %}ip-gone{% endif %}">
+        <td class="nowrap">{{ r.last_scanned_at|fmtdate }}</td>
+        <td class="nowrap">
+          {# Подсветка самого IP-адреса #}
+          <strong class="{% if r.hl_new_ip %}ip-tag-new{% elif r.hl_gone_ip %}ip-tag-gone{% endif %}">{{ r.ip }}</strong>
+          {% if r.hl_new_ip %}<br><span class="badge ip-badge-new" title="IP не было при прошлом сканировании">новый IP</span>{% endif %}
+          {% if r.hl_gone_ip %}<br><span class="badge ip-badge-gone" title="IP был при прошлом сканировании, но отсутствует в текущем">IP не найден</span>{% endif %}
+          {% if r.alive_no_ports %}<br><span class="port suspect" title="Узел живой, но открытых портов не обнаружено">alive_no_ports</span>{% endif %}
+        </td>
+        {# Источник IP: диапазон (CIDR) / домен / поддомен + домен-источник #}
+        <td class="nowrap">
+          <span class="src-badge src-{{ r.source }}">{{ r.source_label }}</span>
+          {% if r.source_domain %}<br><span class="hint">{{ r.source_domain }}</span>{% endif %}
+        </td>
+        <td>{{ r.hostname or '—' }}</td>
+        {# Требование 4: редактируемое «Описание» в привязке к IP (AJAX) #}
+        <td class="note-cell">
+          {% if editable %}
+          <input type="text" class="note-input" value="{{ r.note }}"
+                 data-ip="{{ r.ip }}" placeholder="—"
+                 title="Описание сохраняется в привязке к IP-адресу">
+          <span class="note-status"></span>
+          {% else %}{{ r.note or '—' }}{% endif %}
+        </td>
+        {# Требование 4: «Администраторы» (редактируемый текст, AJAX) #}
+        <td class="attr-cell">
+          {% if editable %}
+          <input type="text" class="admins-input" value="{{ r.admins }}"
+                 data-ip="{{ r.ip }}" placeholder="—"
+                 title="Администраторы хранятся в привязке к IP-адресу">
+          <span class="note-status"></span>
+          {% else %}{{ r.admins or '—' }}{% endif %}
+        </td>
+        {# Требование 4: «Контроль и защита» (галочки, AJAX) #}
+        <td class="ctrl-cell" data-ip="{{ r.ip }}">
+          {% set ctrls = [('ctrl_cpt','CPT'),('ctrl_soc','SOC'),('ctrl_vulnscan','сканер'),('ctrl_waf','WAF'),('ctrl_ddos','DDOS')] %}
+          {% for key, label in ctrls %}
+            <label class="ctrl-chk" title="{{ label }}">
+              <input type="checkbox" class="ctrl-input" data-ip="{{ r.ip }}"
+                     data-flag="{{ key }}" {% if r[key] %}checked{% endif %}
+                     {% if not editable %}disabled{% endif %}>
+              <span>{{ label }}</span>
+            </label>
+          {% endfor %}
+          <span class="note-status"></span>
+        </td>
+        <td>
+          {% for p in r.ports_disp %}
+            {# Подсветка новых портов (требование 7) #}
+            <span class="port {{ 'suspect' if '[syncookie' in p or '[filtered' in p else 'ok' }}{% if r.hl_new_ports %} port-new{% endif %}">{{ p }}</span>
+          {% endfor %}
+          {% if r.advanced_note %}
+            <details class="adv-note">
+              <summary>advanced check</summary>
+              <pre>{{ r.advanced_note }}</pre>
+            </details>
+          {% endif %}
+        </td>
+        <td class="svc">
+          {% for s in r.services_disp %}<div>{{ s }}</div>{% endfor %}
+        </td>
+        <td class="web">
+          {% for w in r.web_disp %}<div>{{ w }}</div>{% endfor %}
+        </td>
+        {# Требование 5: столбец «Уязвимости» с подсветкой по критичности #}
+        <td class="vuln-cell">
+          {% if r.vulns %}
+            <div class="vuln-summary">
+              {% if r.vuln_counts.critical %}<span class="vuln-badge crit" title="Требуют максимально оперативного реагирования">критичные: {{ r.vuln_counts.critical }}</span>{% endif %}
+              {% if r.vuln_counts.warning %}<span class="vuln-badge warn">предупр.: {{ r.vuln_counts.warning }}</span>{% endif %}
+              {% if r.vuln_counts.info %}<span class="vuln-badge info">инфо: {{ r.vuln_counts.info }}</span>{% endif %}
+            </div>
+            <details class="vuln-details">
+              <summary>подробнее ({{ r.vulns|length }})</summary>
+              {% for v in r.vulns %}
+                <div class="vuln-item sev-{{ v.severity }}">
+                  <div class="vuln-title">
+                    <span class="vuln-dot sev-{{ v.severity }}"></span>
+                    {{ v.title }}
+                    {% if v.tool %}<span class="hint">[{{ v.tool }}]</span>{% endif %}
+                  </div>
+                  {% if v.detail %}<div class="vuln-detail">{{ v.detail }}</div>{% endif %}
+                  {% if v.recommendation %}<div class="vuln-rec">→ {{ v.recommendation }}</div>{% endif %}
+                </div>
+              {% endfor %}
+            </details>
+          {% else %}—{% endif %}
+        </td>
+        <td class="nowrap">{{ r.first_seen|fmtdate }}</td>
+        <td class="nowrap">{{ r.prev_scanned_at|fmtdate }}</td>
+        {# Подсветка примечания, если есть новые/пропавшие порты или смена присутствия #}
+        <td class="diff {% if r.hl_new_ip %}diff-new{% elif r.hl_gone_ip %}diff-gone{% elif r.hl_new_ports %}diff-portnew{% elif r.hl_gone_ports %}diff-portgone{% endif %}">{{ r.diff_prev_text }}</td>
+        <td class="nowrap">{{ r.prev2_scanned_at|fmtdate }}</td>
+        <td class="diff">{{ r.diff_prev2_text }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+{% endmacro %}
