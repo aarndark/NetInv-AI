@@ -12,8 +12,10 @@ webscan.py — выявление и фингерпринт web-ресурсов
 Таймауты короткие, чтобы не вешать общий скан и не триггерить пороги firewall.
 """
 
+import random
 import re
 import shutil
+import string
 import subprocess
 
 import vuln_rules
@@ -151,24 +153,63 @@ def _curl_headers(url, timeout=12):
     return status, headers
 
 
-def _curl_path_status(base_url, path, timeout=10):
-    """HTTP-код доступности относительного пути (HEAD-подобный GET)."""
+def _curl_path(base_url, path, timeout=10, want_body=True, body_limit=8192):
+    """Запросить относительный путь. Вернуть (status_code, body).
+
+    Для контентной валидации (треб. 3) тело ответа ограничено
+    body_limit байтами (неинтрузивно, не скачиваем большие файлы).
+    """
     if not CURL:
-        return 0
+        return 0, ""
     url = base_url.rstrip("/") + path
     try:
-        proc = subprocess.run(
-            [CURL, "-sk", "--max-time", str(timeout), "-o", "/dev/null",
-             "-w", "%{http_code}", "-A",
-             "Mozilla/5.0 (compatible; NetInvScanner/1.0)", url],
-            capture_output=True, text=True, timeout=timeout + 6,
-        )
+        # -r 0-8191: берём только начало тела (Range) — экономия и тишина.
+        cmd = [CURL, "-sk", "--max-time", str(timeout), "-w",
+               "\nNETINV_CODE:%{http_code}", "-A",
+               "Mozilla/5.0 (compatible; NetInvScanner/1.4)"]
+        if want_body:
+            cmd += ["-r", f"0-{body_limit - 1}"]
+        else:
+            cmd += ["-o", "/dev/null"]
+        cmd.append(url)
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              timeout=timeout + 6)
     except Exception:  # noqa: BLE001
-        return 0
-    try:
-        return int((proc.stdout or "0").strip()[:3])
-    except ValueError:
-        return 0
+        return 0, ""
+    out = proc.stdout or ""
+    code = 0
+    m = re.search(r"NETINV_CODE:(\d{3})", out)
+    if m:
+        code = int(m.group(1))
+        out = out[:m.start()]
+    return code, out[:body_limit]
+
+
+def _curl_path_status(base_url, path, timeout=10):
+    """Совместимость: только HTTP-код относительного пути."""
+    code, _ = _curl_path(base_url, path, timeout=timeout, want_body=False)
+    return code
+
+
+def probe_catch_all(base_url, timeout=8):
+    """Catch-all detection (треб. 3): отвечает ли сервер 200 на любой путь.
+
+    Пробуем 3 заведомо несуществующих случайных пути. Если сервер на все
+    из них отвечает 200 — это catch-all (SPA/прокси/кастомная 200-заглушка),
+    и словарные находки по путям будут подавлены (было 84 ложных
+    critical). Возвращает True/False.
+    """
+    if not CURL:
+        return False
+    hits = 0
+    tries = 3
+    for _ in range(tries):
+        rnd = "".join(random.choices(string.ascii_lowercase + string.digits, k=16))
+        code, _body = _curl_path(base_url, f"/netinv_{rnd}_nonexistent",
+                                 timeout=timeout, want_body=False)
+        if code == 200:
+            hits += 1
+    return hits == tries
 
 
 def _run_optional(tool_bin, args, timeout):
@@ -184,25 +225,55 @@ def _run_optional(tool_bin, args, timeout):
         return None
 
 
-def assess_vulns(url, server="", tech="", heavy=False, log=None):
-    """Базовая проверка web-ресурса на уязвимости (требование 5).
-
-    url    — базовый URL ресурса (например, http://10.0.0.5/);
-    server — заголовок Server (из probe_web);
-    tech   — фингерпринт whatweb (из probe_web);
-    heavy  — запускать ли тяжёлые/активные инструменты (nikto/wpscan/dalfox);
-    log    — функция логирования (например, print) для предупреждений.
-
-    Возвращает список находок (dict с ключами severity/category/title/detail/
-    recommendation/tool/url) — каждая пригодна для db.add_vuln(...).
-    Все инструменты опциональны: отсутствие любого — пропуск с предупреждением.
+def _dedup(findings):
+    """Дедупликация находок (треб. 3: раньше каждая находка дублировалась
+    для портов 80 и 443). Ключ дедупа: (category, title, cve_id).
     """
+    seen = {}
+    out = []
+    for f in findings:
+        key = (f.get("category"), f.get("title"), f.get("cve_id", ""))
+        if key in seen:
+            continue
+        seen[key] = True
+        out.append(f)
+    return out
+
+
+def assess_vulns(url, server="", tech="", heavy=False, log=None,
+                 external=False, cve_online=True, cve_vulners=True,
+                 ports_info=None):
+    """Проверка web-ресурса на уязвимости (треб. 5, 3, 3б, 2).
+
+    url        — базовый URL ресурса;
+    server     — заголовок Server (из probe_web);
+    tech       — фингерпринт whatweb;
+    heavy      — запускать ли тяжёлые инструменты (nikto/wpscan/dalfox);
+    external   — узел во внешнем периметре (IP из DNS, НЕ за Palo Alto):
+                 углублённая web-проверка (больше путей, включаем heavy);
+    cve_online — онлайн-запрос NVD/OSV по версиям ПО (треб. 3б);
+    cve_vulners— nmap NSE vulners по версиям ПО (треб. 3б);
+    ports_info — список портов узла [{port, product, version, service}] для CVE.
+
+    Возвращает ДЕДУПЛИЦИРОВАННЫЙ список находок для db.add_vuln(...).
+    Все инструменты опциональны (graceful degradation).
+    """
+    import cve_lookup
+
     def _log(msg):
         if log:
             log("[webscan] " + msg)
 
     findings = []
     is_https = url.lower().startswith("https://")
+
+    # 0) Catch-all detection (треб. 3) — подавить ложные 200-находки.
+    catch_all = False
+    if CURL:
+        catch_all = probe_catch_all(url)
+        if catch_all:
+            _log(f"{url}: сервер отвечает 200 на любой путь (catch-all) — "
+                 "словарные находки по путям подавлены.")
 
     # 1) curl: security-headers ----------------------------------------
     if CURL:
@@ -212,36 +283,69 @@ def assess_vulns(url, server="", tech="", heavy=False, log=None):
     else:
         _log("curl не установлен — пропуск проверки security-headers.")
 
-    # 2) curl: открытые конфигурационные/backup-файлы и служебные пути --
+    # 2) curl: служебные пути С КОНТЕНТНОЙ ВАЛИДАЦИЕЙ (треб. 3) ------
     if CURL:
         probe_paths = list(vuln_rules.SECRET_FILES) + list(vuln_rules.ADMIN_PATHS) \
-            + list(vuln_rules.TEST_PATHS)
+            + list(vuln_rules.TEST_PATHS) + [vuln_rules.SECURITY_TXT]
+        # Внешние узлы (корпоративные порталы) — углублённая проверка:
+        # дополнительные пути (треб. 2).
+        if external:
+            probe_paths += ["/.aws/credentials", "/config.json",
+                            "/.env.local", "/.env.production",
+                            "/wp-config.php", "/api", "/swagger.json",
+                            "/.git/", "/storage/logs/laravel.log"]
         for path in probe_paths:
-            code = _curl_path_status(url, path)
-            f = vuln_rules.classify_open_path(path, code)
+            code, body = _curl_path(url, path)
+            f = vuln_rules.classify_open_path(path, code, body=body,
+                                              catch_all=catch_all)
             if f:
                 f["url"] = url.rstrip("/") + path
                 findings.append(f)
-    # 3) whatweb/Server: устаревшие версии и CMS -----------------------
-    findings += vuln_rules.classify_server_version(server)
-    findings += vuln_rules.classify_cms(tech)
 
-    # 4) nmap http-NSE (неинтрузивные http-скрипты) --------------------
-    if NMAP:
+    # 3) whatweb/Server: устаревшие версии и CMS ----------------------
+    sv = vuln_rules.classify_server_version(server)
+    for f in sv:
+        f.setdefault("url", url)
+    findings += sv
+    cm = vuln_rules.classify_cms(tech)
+    for f in cm:
+        f.setdefault("url", url)
+    findings += cm
+
+    # 3б) CVE по версиям ПО (треб. 3б): offline-таблица + онлайн NVD/OSV.
+    # В основном скане cve_online и cve_vulners включены по умолчанию.
+    for pinfo in (ports_info or []):
+        product = pinfo.get("product", "")
+        version = pinfo.get("version", "")
+        if not product:
+            continue
+        try:
+            cves = cve_lookup.collect_cves(product, version,
+                                           online=cve_online, log=log)
+        except Exception as e:  # noqa: BLE001
+            _log(f"CVE-поиск для {product} {version} ошибка: {e}")
+            cves = []
+        for cve in cves:
+            findings.append(cve_lookup.build_cve_finding(
+                product, version, url, cve, port=pinfo.get("port")))
+
+    # 3б) nmap NSE vulners по версиям ПО (треб. 3б) -----------------
+    if cve_vulners and NMAP:
         host_port = _host_port_from_url(url)
         if host_port:
             host, port = host_port
-            scripts = ("http-enum,http-headers,http-title,http-wordpress-enum,"
-                       "http-security-headers")
             out = _run_optional(
-                NMAP, ["-Pn", "-p", str(port), "--script", scripts,
-                       "--host-timeout", "120s", host], timeout=180)
+                NMAP, ["-Pn", "-sV", "-p", str(port), "--script", "vulners",
+                       "--host-timeout", "180s", host], timeout=240)
             if out:
-                findings += vuln_rules.classify_tool_output("nmap-http", out)
-    else:
-        _log("nmap не установлен — пропуск http-NSE проверок.")
+                for cve in cve_lookup.parse_vulners_output(out):
+                    findings.append(cve_lookup.build_cve_finding(
+                        server or "сервис", "", url, cve, port=port))
 
-    # ---- Тяжёлые/активные инструменты только при heavy=True ----------
+    # ---- Тяжёлые/активные инструменты ----------
+    # Внешние узлы (треб. 2): web-проверку дорабатываем — включаем heavy.
+    if external:
+        heavy = True
     if heavy:
         # 5) nikto — обзорный web-сканер.
         if NIKTO:
@@ -275,7 +379,10 @@ def assess_vulns(url, server="", tech="", heavy=False, log=None):
         else:
             _log("dalfox не установлен — пропуск (опционально).")
 
-    return findings
+    # Проставляем URL там, где не задан, и ДЕДУПЛИЦИРУЕМ (треб. 3).
+    for f in findings:
+        f.setdefault("url", url)
+    return _dedup(findings)
 
 
 def _host_port_from_url(url):

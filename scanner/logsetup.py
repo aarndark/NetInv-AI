@@ -1,0 +1,273 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+logsetup.py — подробное логирование сканирований NetInv (требование 5 v1.4.0).
+
+Каждый запуск сканирования (scanner.run_scan) ведёт ОТДЕЛЬНЫЙ подробный файл
+лога, куда пишется весь ход операции: команды nmap, DNS-разведка, выявление
+web-ресурсов, какие утилиты запущены/пропущены, найденные уязвимости и CVE,
+ошибки и предупреждения.
+
+КАТАЛОГ ЛОГОВ
+-------------
+По умолчанию — /opt/netinv/logs (как просил пользователь). Если каталог
+недоступен для записи (например, NetInv запущен не из /opt или без прав),
+выполняется аккуратный фолбэк в <корень проекта>/logs. Путь можно явно
+переопределить переменной окружения NETINV_LOG_DIR.
+
+ИМЯ ФАЙЛА
+---------
+netinv_YYMMDD_TIME.log, где YYMMDD — дата, TIME — HHMMSS.
+Пример: netinv_260623_115530.log
+
+ВЫВОД
+-----
+Логгер настроен на ДВА обработчика:
+  1. FileHandler  — подробный лог в файл (уровень DEBUG).
+  2. StreamHandler(stdout) — дублирование в консоль, где запущен netinv
+     (требование 7): пользователь видит ход сканирования в реальном времени.
+"""
+
+import datetime as dt
+import logging
+import os
+import subprocess
+import sys
+
+# Каталог логов по умолчанию (требование 5).
+DEFAULT_LOG_DIR = "/opt/netinv/logs"
+
+
+def _project_root():
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def resolve_log_dir():
+    """Определить рабочий каталог логов с учётом прав и фолбэка.
+
+    Порядок:
+      1. NETINV_LOG_DIR (если задан в окружении);
+      2. /opt/netinv/logs (по умолчанию);
+      3. <корень проекта>/logs (фолбэк, если /opt недоступен).
+    Возвращает (путь, использован_ли_фолбэк, сообщение_или_None).
+    """
+    candidates = []
+    env_dir = os.environ.get("NETINV_LOG_DIR")
+    if env_dir:
+        candidates.append(env_dir)
+    candidates.append(DEFAULT_LOG_DIR)
+    fallback = os.path.join(_project_root(), "logs")
+    candidates.append(fallback)
+
+    last_err = None
+    for i, path in enumerate(candidates):
+        try:
+            os.makedirs(path, exist_ok=True)
+            # Проверяем реальную возможность записи.
+            if os.access(path, os.W_OK | os.X_OK):
+                used_fallback = (path == fallback and path != candidates[0])
+                msg = None
+                if used_fallback:
+                    msg = (f"Каталог логов по умолчанию недоступен — "
+                           f"используется фолбэк: {path}")
+                return path, used_fallback, msg
+        except OSError as e:
+            last_err = e
+            continue
+    # Совсем ничего не получилось — последний фолбэк во временный каталог.
+    tmp = os.path.join("/tmp", "netinv_logs")
+    os.makedirs(tmp, exist_ok=True)
+    return tmp, True, (f"Не удалось создать стандартный каталог логов "
+                       f"({last_err}); используется {tmp}")
+
+
+def log_filename(when=None):
+    """Имя файла лога формата netinv_YYMMDD_TIME.log (требование 5)."""
+    when = when or dt.datetime.now()
+    return when.strftime("netinv_%y%m%d_%H%M%S.log")
+
+
+class ScanLogger:
+    """Обёртка над logging.Logger для одного запуска сканирования.
+
+    Использование:
+        slog = ScanLogger(run_id=42)
+        slog.info("Запуск nmap ...")
+        slog.tool_output("nmap", proc.stdout)   # сырой вывод утилиты
+        slog.close()
+    """
+
+    def __init__(self, run_id=None, echo_console=True, when=None):
+        self.log_dir, self.used_fallback, self.dir_msg = resolve_log_dir()
+        self.filename = log_filename(when)
+        self.path = os.path.join(self.log_dir, self.filename)
+        self.run_id = run_id
+
+        # Уникальное имя логгера на запуск, чтобы обработчики не дублировались.
+        logger_name = f"netinv.scan.{run_id or id(self)}"
+        self.logger = logging.getLogger(logger_name)
+        self.logger.setLevel(logging.DEBUG)
+        self.logger.propagate = False
+        # На случай повторной инициализации — снимаем старые обработчики.
+        for h in list(self.logger.handlers):
+            self.logger.removeHandler(h)
+
+        fmt = logging.Formatter(
+            "%(asctime)s [%(levelname)s] %(message)s", "%Y-%m-%d %H:%M:%S")
+
+        self._fh = logging.FileHandler(self.path, encoding="utf-8")
+        self._fh.setLevel(logging.DEBUG)
+        self._fh.setFormatter(fmt)
+        self.logger.addHandler(self._fh)
+
+        self._sh = None
+        if echo_console:
+            self._sh = logging.StreamHandler(sys.stdout)
+            self._sh.setLevel(logging.INFO)
+            self._sh.setFormatter(fmt)
+            self.logger.addHandler(self._sh)
+
+        if self.dir_msg:
+            self.logger.warning(self.dir_msg)
+        self.logger.info("Файл лога: %s", self.path)
+
+    # --- удобные уровни ----------------------------------------------------
+    def debug(self, msg, *a):
+        self.logger.debug(msg, *a)
+
+    def info(self, msg, *a):
+        self.logger.info(msg, *a)
+
+    def warning(self, msg, *a):
+        self.logger.warning(msg, *a)
+
+    def error(self, msg, *a):
+        self.logger.error(msg, *a)
+
+    def log(self, msg):
+        """Совместимость с callback-стилем log('строка') в модулях сканера."""
+        self.logger.info("%s", msg)
+
+    def tool_output(self, tool, output, level=logging.DEBUG):
+        """Записать сырой stdout/stderr утилиты (nmap/whatweb/nikto/...).
+
+        В файл пишется целиком (DEBUG); в консоль построчные хвосты не дублируем,
+        чтобы не зашумлять, — за реальный поток консоли отвечает scanner.py,
+        который запускает утилиты с прямым выводом (требование 7).
+        """
+        if not output:
+            return
+        head = f"----- вывод {tool} -----"
+        self.logger.log(level, head)
+        for line in str(output).splitlines():
+            self.logger.log(level, "  %s", line)
+        self.logger.log(level, "----- конец вывода %s -----", tool)
+
+    def section(self, title):
+        self.logger.info("=" * 8 + " " + title + " " + "=" * 8)
+
+    def close(self):
+        for h in (self._fh, self._sh):
+            if h is not None:
+                try:
+                    h.flush()
+                    h.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                self.logger.removeHandler(h)
+
+
+# ==========================================================================
+# Требование 7: запуск утилит с ПОТОКОВЫМ выводом stdout в консоль и лог.
+# ==========================================================================
+# scanner.py раньше запускал nmap/whatweb/nikto через subprocess.run(
+#   capture_output=True), то есть вывод появлялся только ПОСЛЕ завершения.
+# Теперь утилиты запускаются через run_streamed(): строки stdout/stderr
+# печатаются в консоль ПО МЕРЕ ПОЯВЛЕНИЯ (реальное время) и одновременно
+# пишутся в файл лога. Это позволяет видеть ход работы nmap и других утилит
+# прямо в терминале, где запущен netinv.
+
+
+def run_streamed(cmd, timeout=None, slog=None, echo=True, label=None,
+                 capture=True):
+    """Запустить внешнюю команду с потоковым выводом в консоль и лог.
+
+    cmd     — список аргументов команды (как для subprocess);
+    timeout — общий таймаут в секундах (None — без ограничения);
+    slog    — экземпляр ScanLogger (или None) для записи строк в файл лога;
+    echo    — печатать ли строки в консоль (stdout) в реальном времени;
+    label   — короткая метка процесса для префикса строк (например, 'nmap');
+    capture — сохранять ли весь вывод и вернуть его строкой.
+
+    Возвращает объект с атрибутами .returncode и .stdout (как у
+    subprocess.CompletedProcess), чтобы оставаться совместимым с прежним кодом.
+    stderr объединён в общий поток (печатается и логируется вместе с stdout).
+    """
+    import time as _time
+
+    label = label or (os.path.basename(cmd[0]) if cmd else "proc")
+    prefix = f"    [{label}] "
+    collected = []
+
+    def _emit(line):
+        line = line.rstrip("\n")
+        if echo:
+            # Прямой вывод в консоль с префиксом утилиты.
+            sys.stdout.write(prefix + line + "\n")
+            sys.stdout.flush()
+        if slog is not None:
+            # В файл лога — без дублирования в консоль (echo уже сделан выше),
+            # поэтому пишем напрямую в файловый обработчик через debug-уровень.
+            slog.logger.debug("%s%s", prefix, line)
+        if capture:
+            collected.append(line)
+
+    if slog is not None:
+        slog.logger.info("Запуск: %s", " ".join(cmd))
+    elif echo:
+        sys.stdout.write(prefix + "запуск: " + " ".join(cmd) + "\n")
+        sys.stdout.flush()
+
+    start = _time.time()
+    try:
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, bufsize=1)
+    except FileNotFoundError as e:
+        if slog is not None:
+            slog.error("Не удалось запустить %s: %s", label, e)
+        return subprocess.CompletedProcess(cmd, 127, "")
+
+    try:
+        for line in iter(proc.stdout.readline, ""):
+            _emit(line)
+            if timeout is not None and (_time.time() - start) > timeout:
+                proc.kill()
+                msg = f"превышен таймаут {timeout}s — процесс {label} остановлен"
+                if slog is not None:
+                    slog.warning(msg)
+                elif echo:
+                    sys.stdout.write(prefix + msg + "\n")
+                break
+    finally:
+        try:
+            proc.stdout.close()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            proc.wait(timeout=10)
+        except Exception:  # noqa: BLE001
+            proc.kill()
+
+    return subprocess.CompletedProcess(
+        cmd, proc.returncode if proc.returncode is not None else -1,
+        "\n".join(collected) if capture else "")
+
+
+if __name__ == "__main__":
+    sl = ScanLogger(run_id=0)
+    sl.section("ТЕСТ")
+    sl.info("Проверка логирования")
+    sl.tool_output("echo", "строка 1\nстрока 2")
+    sl.close()
+    print("Лог записан:", sl.path)

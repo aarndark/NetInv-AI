@@ -6,7 +6,7 @@
   <title>{% block title %}NetInv — Инвентаризационное сканирование{% endblock %}</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
-<body>
+<body class="{% block body_class %}{% endblock %}">
   <header class="topbar">
     <!-- Требование 2: логотип и надпись NetInv — ссылка на стартовую страницу -->
     <a class="brand" href="{{ url_for('index') }}" title="На стартовую страницу NetInv">

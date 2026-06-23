@@ -66,10 +66,41 @@ input[type=text]:focus,select:focus{outline:none;border-color:var(--accent)}
 .flash.error{background:#3a1a1f;color:#f3a0a8;border:1px solid #5b2630}
 
 .report-head{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px;gap:16px}
-.report-actions{display:flex;gap:10px;align-items:center}
+.report-actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+
+/* Треб. 1в: страница отчёта — почти на всю ширину браузера.
+   Класс wide расширяет контейнер отчёта за базовый max-width. */
+body.report-page .container{max-width:97vw}
+
+/* Треб. 1г: краткая сводка по отчёту (чипы). */
+.report-summary{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 14px}
+.sum-chip{font-size:12px;padding:4px 11px;border-radius:20px;background:var(--panel2);
+  border:1px solid var(--line);color:var(--muted)}
+.sum-chip strong{color:var(--txt)}
+.sum-chip.sum-live{background:#0c2e1a;border-color:#16432a;color:#7ee2a8}
+.sum-chip.sum-palo{background:#33280a;border-color:#5a4410;color:#fcd34d}
+.sum-chip.sum-crit{background:#3a1a1f;border-color:#5b2630;color:#f3a0a8}
+.sum-chip.sum-warn{background:#33280a;border-color:#5a4410;color:#fcd34d}
+.sum-chip.sum-info{background:#0b2a3a;border-color:#14405a;color:#7dd3fc}
 
 /* Требование 2: горизонтальная прокрутка ВСЕГДА видима и доступна. */
 .table-scroll{overflow-x:scroll;overflow-y:visible;padding-bottom:2px}
+.table-scroll:focus{outline:2px solid var(--accent2);outline-offset:-2px}
+
+/* ====== Треб. 1г: отчёт в отдельном окне (полный экран) ====== */
+body.fullreport-body{margin:0;display:flex;flex-direction:column;min-height:100vh}
+.fullreport-bar{position:sticky;top:0;z-index:30;display:flex;flex-wrap:wrap;
+  align-items:center;gap:14px;padding:10px 16px;background:var(--panel2);
+  border-bottom:1px solid var(--line)}
+.fullreport-title{display:flex;align-items:center;gap:10px;font-size:14px;color:var(--txt)}
+.fullreport-title code{color:var(--accent2)}
+.fullreport-bar .report-summary{margin:0;flex:1 1 auto}
+.fullreport-actions{display:flex;gap:8px;align-items:center;margin-left:auto}
+.fullreport-main{flex:1 1 auto;padding:8px 16px 24px}
+/* В отдельном окне прокрутка таблицы по высоте окна, sticky-заголовки. */
+.fullreport-main .table-scroll{max-height:calc(100vh - 230px);overflow-y:auto;overflow-x:scroll}
+.fullreport-main .table-scroll::-webkit-scrollbar{width:14px;height:14px}
+.fullreport-main .tbl.report thead th{position:sticky;top:0;z-index:5}
 /* Заметная и удобная полоса прокрутки (WebKit + Firefox). */
 .table-scroll{scrollbar-width:auto;scrollbar-color:var(--accent2) var(--panel2)}
 .table-scroll::-webkit-scrollbar{height:14px}
@@ -80,7 +111,25 @@ input[type=text]:focus,select:focus{outline:none;border-color:var(--accent)}
 /* Требование 2: настраиваемая перетягиванием ширина колонок.
    table-layout:fixed + явные ширины <th> позволяют задавать ширину
    независимо от содержимого; min-width не даёт таблице схлопнуться. */
-.tbl.report{table-layout:fixed;min-width:1950px}
+.tbl.report{table-layout:fixed;min-width:2680px}
+/* Треб. 1б: широкие колонки по умолчанию — большинство данных без переноса.
+   Явные ширины <th> по порядку столбцов (table-layout:fixed их соблюдает). */
+.tbl.report th:nth-child(1){width:135px}   /* Дата сканирования */
+.tbl.report th:nth-child(2){width:150px}   /* IP-адрес */
+.tbl.report th:nth-child(3){width:130px}   /* Источник */
+.tbl.report th:nth-child(4){width:180px}   /* Доменное имя */
+.tbl.report th:nth-child(5){width:170px}   /* Описание */
+.tbl.report th:nth-child(6){width:150px}   /* Администраторы */
+.tbl.report th:nth-child(7){width:175px}   /* Контроль и защита */
+.tbl.report th:nth-child(8){width:180px}   /* Открытые порты */
+.tbl.report th:nth-child(9){width:230px}   /* Опубликованные сервисы */
+.tbl.report th:nth-child(10){width:260px}  /* Web-ресурсы */
+.tbl.report th:nth-child(11){width:330px}  /* Уязвимости */
+.tbl.report th:nth-child(12){width:135px}  /* Первое обнаружение */
+.tbl.report th:nth-child(13){width:135px}  /* Предыдущее сканирование */
+.tbl.report th:nth-child(14){width:230px}  /* Отличия от предыдущего */
+.tbl.report th:nth-child(15){width:135px}  /* Позапрошлое сканирование */
+.tbl.report th:nth-child(16){width:230px}  /* Отличия от позапрошлого */
 .tbl.report th{position:relative}
 .tbl.report th .col-resizer{position:absolute;top:0;right:0;width:7px;height:100%;
   cursor:col-resize;user-select:none;touch-action:none}
@@ -211,6 +260,15 @@ tr.vuln-row-critical{background:rgba(239,68,68,.16);box-shadow:inset 3px 0 0 #ef
 .vuln-dot.sev-info{background:#38bdf8}
 .vuln-detail{font-size:10.5px;color:#cbd5e1;margin-top:3px;word-break:break-word}
 .vuln-rec{font-size:10.5px;color:#7ee2a8;margin-top:3px;word-break:break-word}
+/* Треб. 3а: обоснование выбранного уровня severity. */
+.vuln-sevreason{font-size:10px;color:#94a3b8;margin-top:3px;word-break:break-word}
+/* Треб. 3б: блок CVE в столбце «Уязвимости». */
+.vuln-cve{margin-top:4px;display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.cve-link{font-family:"JetBrains Mono",monospace;font-size:10.5px;font-weight:600;
+  color:#fca5a5;background:#2a1416;border:1px solid #5b2630;border-radius:5px;padding:1px 6px}
+a.cve-link:hover{text-decoration:underline;color:#fecaca}
+.cve-cvss{font-size:10px;font-weight:600;color:#fcd34d;background:#33280a;
+  border:1px solid #5a4410;border-radius:5px;padding:1px 6px}
 
 /* ====== Требование 3: кликабельные строки «Истории запусков» ====== */
 .runs-tbl tbody tr.run-row{cursor:pointer;transition:background .12s}

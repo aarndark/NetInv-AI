@@ -287,6 +287,22 @@ def diff_to_text(diff_json):
     return "; ".join(parts)
 
 
+def diff_to_lines(diff_json):
+    """То же, что diff_to_text, но возвращает СПИСОК блоков отличий (треб. 1а).
+
+    Каждый элемент — отдельный блок отличия, чтобы в таблице выводить их
+    построчно (а не одной строкой через «; »). Для пустого/без изменений
+    возвращается список из одного элемента.
+    """
+    text = diff_to_text(diff_json)
+    if text in ("—", "без изменений") or not text:
+        return [text or "—"]
+    # Спец-статусы без разделителей возвращаем как один блок.
+    if "; " not in text:
+        return [text]
+    return [p for p in text.split("; ") if p]
+
+
 def diff_flags(diff_json):
     """Флаги подсветки для отчёта по строке IP.
 

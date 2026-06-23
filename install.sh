@@ -168,6 +168,36 @@ fi
 chmod u+rwx data 2>/dev/null || true
 [[ -f data/data.db ]] && chmod u+rw data/data.db 2>/dev/null || true
 
+# --- 4в. каталог логов /opt/netinv/logs (требование 5 v1.4.0) --------------
+# Подробные логи сканирований по умолчанию пишутся в /opt/netinv/logs
+# (имя файла netinv_YYMMDD_TIME.log). Каталог /opt принадлежит root,
+# поэтому при наличии прав создаём его заранее и отдаём владение
+# исходному пользователю. Если прав нет — это НЕ ошибка: модуль
+# logsetup.py аккуратно деградирует на <корень проекта>/logs, а при
+# недоступности и его — на /tmp/netinv_logs. Переопределить путь можно
+# переменной окружения NETINV_LOG_DIR.
+LOG_DIR="/opt/netinv/logs"
+if [[ -n "$SUDO" || "${EUID:-$(id -u)}" -eq 0 ]]; then
+  if $SUDO mkdir -p "$LOG_DIR" 2>/dev/null; then
+    # отдаём владение исходному пользователю, чтобы web/cron от обычного
+    # пользователя могли писать логи.
+    if [[ "${EUID:-$(id -u)}" -eq 0 && -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
+      LOG_OWNER="${SUDO_USER}:$(id -gn "${SUDO_USER}" 2>/dev/null || echo "${SUDO_USER}")"
+      chown -R "$LOG_OWNER" "$LOG_DIR" 2>/dev/null || true
+    fi
+    $SUDO chmod 0775 "$LOG_DIR" 2>/dev/null || true
+    ok "Каталог логов готов: $LOG_DIR"
+  else
+    warn "Не удалось создать $LOG_DIR — логи будут писаться в <корень проекта>/logs (фолбэк)."
+  fi
+else
+  warn "Нет root/sudo — каталог $LOG_DIR не создан; логи пойдут в <корень проекта>/logs (фолбэк)."
+  warn "    Чтобы использовать путь по умолчанию: sudo mkdir -p $LOG_DIR && sudo chown -R \$USER $LOG_DIR"
+fi
+# Локальный фолбэк-каталог логов внутри проекта создаём всегда — на случай,
+# если /opt/netinv/logs недоступен во время запуска сканирования.
+mkdir -p "$SCRIPT_DIR/logs" 2>/dev/null || true
+
 # --- 5. системная группа cpt -----------------------------------------------
 # Доступ к NetInv разрешён только группе cpt (Continuous Penetration
 # Test). На уровне ОС создаём реальную группу cpt (для разграничения

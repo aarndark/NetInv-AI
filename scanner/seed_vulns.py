@@ -39,17 +39,25 @@ if h10:
                 "GET http://192.168.56.10/.git/HEAD → 200 OK; возможна выгрузка "
                 "исходного кода и секретов.",
                 "Закрыть доступ к .git на уровне веб-сервера/прокси.",
-                "curl", "http://192.168.56.10/")
-    db.add_vuln(h10, "critical", "outdated_version",
-                "Устаревший Apache httpd 2.4.49 (известный RCE/path traversal)",
-                "Server: Apache/2.4.49 (CVE-2021-41773).",
-                "Обновить httpd до актуальной версии.",
-                "curl", "http://192.168.56.10/")
+                "curl", "http://192.168.56.10/",
+                severity_reason="Контент подтверждён (сигнатура ref:/HEAD), "
+                "не catch-all; раскрытие исходного кода → critical.")
+    # Треб. 3б: находка с заполненными CVE-полями (демо блока CVE).
+    db.add_vuln(h10, "critical", "cve",
+                "Apache httpd 2.4.49 — CVE-2021-41773 (path traversal / RCE)",
+                "Server: Apache/2.4.49. Сопоставлено по версии ПО.",
+                "Обновите httpd до 2.4.51+; сверьтесь с деталями CVE: "
+                "https://nvd.nist.gov/vuln/detail/CVE-2021-41773",
+                "offline-таблица CVE", "http://192.168.56.10/",
+                severity_reason="CVSS 7.5 (высокий) → critical; точное совпадение версии.",
+                cve_id="CVE-2021-41773", cvss="7.5",
+                cve_source="offline-таблица")
     db.add_vuln(h10, "warning", "security_headers",
                 "Отсутствует заголовок HSTS",
                 "В ответе нет Strict-Transport-Security.",
                 "Добавить HSTS на HTTPS-ресурсе.",
-                "curl", "https://192.168.56.10/")
+                "curl", "https://192.168.56.10/",
+                severity_reason="Отсутствие security-заголовка — не прямая компрометация → warning.")
     db.add_vuln(h10, "info", "tech",
                 "Обнаружена CMS WordPress",
                 "Рекомендуется углублённая проверка wpscan.",

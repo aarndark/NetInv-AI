@@ -44,6 +44,7 @@ sys.path.insert(0, os.path.join(ROOT, "scanner"))
 import db            # noqa: E402
 import diff_engine   # noqa: E402
 import scanner       # noqa: E402
+import cve_lookup    # noqa: E402
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("NETINV_SECRET", "change-me-in-prod")
@@ -103,14 +104,16 @@ def logout():
 # ----------------------- фоновые сканы -----------------------
 
 def _bg_scan(target_id, profile, ports, top_ports, full_ports, extra_nse, do_web,
-             syn_mode, advanced_anp, dig_rdns=False, dns_brute=False):
+             syn_mode, advanced_anp, dig_rdns=False, dns_brute=False,
+             cve_online=True, cve_vulners=True):
     """Фоновый РАСШИРЕННЫЙ скан (scan_class='advanced')."""
     try:
         scanner.run_scan(target_id, profile=profile, ports=ports or None,
                          top_ports=top_ports, full_ports=full_ports,
                          extra_nse=extra_nse, do_web=do_web, syn_mode=syn_mode,
                          advanced_anp=advanced_anp, dig_rdns=dig_rdns,
-                         dns_brute=dns_brute, scan_class="advanced")
+                         dns_brute=dns_brute, scan_class="advanced",
+                         cve_online=cve_online, cve_vulners=cve_vulners)
     except Exception as e:  # noqa: BLE001
         app.logger.error("advanced scan failed: %s", e)
 
@@ -226,11 +229,14 @@ def start_advanced_scan(target_id):
     advanced_anp = request.form.get("advanced_anp") == "on"
     dig_rdns = request.form.get("dig_rdns") == "on"
     dns_brute = request.form.get("dns_brute") == "on"
+    # Треб. 3б: в расширенном скане CVE-проверки — опциональны (галочки).
+    cve_online = request.form.get("cve_online") == "on"
+    cve_vulners = request.form.get("cve_vulners") == "on"
 
     t = threading.Thread(
         target=_bg_scan,
         args=(target_id, profile, ports, top_ports, full_ports, extra_nse, do_web,
-              syn_mode, advanced_anp, dig_rdns, dns_brute),
+              syn_mode, advanced_anp, dig_rdns, dns_brute, cve_online, cve_vulners),
         daemon=True,
     )
     t.start()
@@ -262,10 +268,53 @@ def report(target_id):
     # Привязанные домены и найденные поддомены объекта.
     domains = db.list_target_domains(target_id)
     subdomains = db.list_subdomains(target_id)
+    summary = _report_summary(rows, live_rows, palo_rows)
     return render_template("report.html", target=target,
                            live_rows=live_rows, palo_rows=palo_rows,
                            rows=rows, runs=runs, scan_class=scan_class,
-                           domains=domains, subdomains=subdomains)
+                           domains=domains, subdomains=subdomains,
+                           summary=summary)
+
+
+def _report_summary(rows, live_rows, palo_rows):
+    """Краткая сводка по отчёту (треб. 1г) — для главной страницы."""
+    crit = warn = info = 0
+    for r in rows:
+        vc = r.get("vuln_counts", {})
+        crit += vc.get("critical", 0)
+        warn += vc.get("warning", 0)
+        info += vc.get("info", 0)
+    return {
+        "total": len(rows),
+        "live": len(live_rows),
+        "palo": len(palo_rows),
+        "crit": crit,
+        "warn": warn,
+        "info": info,
+    }
+
+
+@app.route("/report/<int:target_id>/full")
+@login_required
+def report_full(target_id):
+    """Треб. 1г: отчёт в отдельном окне/вкладке на весь экран.
+
+    Таблица растянута по окну, sticky-заголовки, всегда видимые
+    полосы прокрутки, прокрутка стрелками клавиатуры.
+    """
+    target = db.get_target(target_id)
+    if not target:
+        abort(404)
+    scan_class = request.args.get("scan_class", "main")
+    if scan_class not in ("main", "advanced"):
+        scan_class = "main"
+    rows = _build_report_rows(target_id, scan_class)
+    live_rows = [r for r in rows if r["is_live"]]
+    palo_rows = [r for r in rows if not r["is_live"]]
+    summary = _report_summary(rows, live_rows, palo_rows)
+    return render_template("report_full.html", target=target,
+                           live_rows=live_rows, palo_rows=palo_rows,
+                           rows=rows, scan_class=scan_class, summary=summary)
 
 
 @app.route("/runs")
@@ -287,10 +336,12 @@ def report_csv(target_id):
     rows = _build_report_rows(target_id, scan_class)
     buf = io.StringIO()
     w = csv.writer(buf, delimiter=";")
+    # Треб. 4: столбец «Присутствие» удалён из CSV (пустой для большинства
+    # узлов; смена присутствия уже отражена в столбцах «Отличия…»).
     w.writerow([
         "Дата сканирования", "IP-адрес", "Источник", "Доменное имя", "Описание",
         "Администраторы", "Контроль и защита",
-        "Класс сканирования", "Присутствие",
+        "Класс сканирования",
         "Открытые порты (с учётом SYN Cookies)", "Опубликованные сервисы",
         "Web-ресурсы", "Уязвимости", "Статус узла", "alive_no_ports advanced check",
         "Первое обнаружение",
@@ -298,7 +349,6 @@ def report_csv(target_id):
         "Дата позапрошлого сканирования", "Отличия от позапрошлого",
     ])
     class_label = "основное" if scan_class == "main" else "расширенное"
-    presence_label = {"new": "новый IP", "gone": "IP не найден", "pres": ""}
     ctrl_names = {"ctrl_cpt": "CPT", "ctrl_soc": "SOC",
                   "ctrl_vulnscan": "сканер уязвимостей", "ctrl_waf": "WAF",
                   "ctrl_ddos": "DDOS"}
@@ -327,7 +377,7 @@ def report_csv(target_id):
         w.writerow([
             r["last_scanned_at"], r["ip"], src_cell, r["hostname"] or "",
             r.get("note") or "", r.get("admins") or "", ctrl_cell,
-            class_label, presence_label.get(r.get("presence"), ""),
+            class_label,
             " | ".join(r["ports_disp"]), " | ".join(r["services_disp"]),
             " | ".join(r["web_disp"]), vuln_cell, status_label,
             r.get("advanced_note") or "",
@@ -512,6 +562,9 @@ def _build_report_rows(target_id, scan_class="main"):
                 alive_no_ports = bool(host.get("alive_no_ports"))
                 advanced_note = host.get("advanced_note") or ""
                 for v in db.vulns_for_host(host["id"]):
+                    # Треб. 3б: кликабельная ссылка NVD для CVE-находок.
+                    if v.get("cve_id"):
+                        v["nvd_url"] = cve_lookup.nvd_link(v["cve_id"])
                     vulns.append(v)
                     sev = v.get("severity", "info")
                     vuln_counts[sev] = vuln_counts.get(sev, 0) + 1
@@ -568,6 +621,9 @@ def _build_report_rows(target_id, scan_class="main"):
             "prev2_scanned_at": st.get("prev2_scanned_at"),
             "diff_prev_text": diff_engine.diff_to_text(st.get("diff_prev")),
             "diff_prev2_text": diff_engine.diff_to_text(st.get("diff_prev2")),
+            # Треб. 1а: блоки отличий построчно (список).
+            "diff_prev_lines": diff_engine.diff_to_lines(st.get("diff_prev")),
+            "diff_prev2_lines": diff_engine.diff_to_lines(st.get("diff_prev2")),
             "ports_disp": ports_disp or ["—"],
             "services_disp": services_disp or ["—"],
             "web_disp": web_disp or ["—"],

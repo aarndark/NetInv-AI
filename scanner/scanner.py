@@ -47,6 +47,8 @@ import db  # noqa: E402
 import diff_engine  # noqa: E402
 import webscan  # noqa: E402
 import dns_recon  # noqa: E402
+import logsetup  # noqa: E402
+import preflight  # noqa: E402
 
 
 # Профили таймингов, согласованные с защитой Palo Alto SYN Flood.
@@ -97,6 +99,9 @@ MAIN_PRESET = {
     "advanced_anp": True,
     "dig_rdns": True,          # обратное разрешение dig -x — всегда в основном скане
     "dns_brute": False,        # brute-force поддоменов — выключен по умолчанию (быстрый режим)
+    # CVE-проверки (треб. 3б): В ОСНОВНОМ скане ВКЛЮЧЕНЫ ПО УМОЛЧАНИЮ.
+    "cve_online": True,        # онлайн-запрос NVD/OSV по версиям ПО
+    "cve_vulners": True,       # nmap NSE vulners по версиям ПО
 }
 
 # Режимы по отношению к защите Palo Alto SYN Flood / SYN Cookies.
@@ -599,7 +604,7 @@ def collect_domain_targets(target_id, dns_brute=False, log=None):
 def run_scan(target_id, profile="stealth", ports=None, top_ports=DEFAULT_TOP_PORTS,
              full_ports=False, extra_nse=False, do_web=True, dry_run=False,
              syn_mode="evasion", advanced_anp=False, scan_class="advanced",
-             dig_rdns=False, dns_brute=False):
+             dig_rdns=False, dns_brute=False, cve_online=True, cve_vulners=True):
     """Полный цикл: nmap -> парсинг -> сохранение -> web-сканирование -> diff.
 
     scan_class: 'main' (основной, фиксированный пресет) либо 'advanced'
@@ -612,14 +617,38 @@ def run_scan(target_id, profile="stealth", ports=None, top_ports=DEFAULT_TOP_POR
     if not target:
         raise SystemExit(f"target_id={target_id} не найден")
 
+    # —— Ранняя инициализация подробного лога (треб. 5) ——
+    # Весь ход скана пишется в netinv_YYMMDD_TIME.log и дублируется в консоль.
+    slog = logsetup.ScanLogger(run_id=None, echo_console=True)
+
+    def log(msg):
+        """Единая точка логирования: в файл лога + консоль (треб. 5, 7)."""
+        slog.log(msg)
+
+    slog.section(f"НАЧАЛО СКАНИРОВАНИЯ: {target['name']} ({target['cidr']})")
+    log(f"Класс скана: {scan_class}; режим SYN: {syn_mode}; профиль: {profile}")
+
+    # —— Проверка наличия утилит (треб. 6) ——
+    slog.section("ПРОВЕРКА УТИЛИТ (треб. 6)")
+    pf = preflight.preflight(log=log)
+    # Если nmap NSE vulners не найден — отключаем vulners (graceful), CVE
+    # продолжают работать через offline-таблицу и онлайн NVD/OSV.
+    if cve_vulners and not pf.get("nse_vulners"):
+        log("nmap NSE vulners не обнаружен — сопоставление CVE через vulners "
+            "пропущено (offline-таблица и онлайн NVD/OSV работают).")
+        cve_vulners = False
+
     started = dt.datetime.now().isoformat(timespec="seconds")
     xml_fd, xml_out = tempfile.mkstemp(suffix=".xml", prefix="nmap_")
     os.close(xml_fd)
 
     # —— DNS-разведка доменов объекта (до запуска nmap) ——
     # Собираем IP из привязанных доменов и добавляем их к сканированию.
+    slog.section("DNS-РАЗВЕДКА ДОМЕНОВ")
     extra_ips, ip_sources, fqdn_by_ip, recon_log = collect_domain_targets(
-        target_id, dns_brute=dns_brute, log=print)
+        target_id, dns_brute=dns_brute, log=log)
+    # Множество внешних IP (из DNS-обогащения) — НЕ за Palo Alto (треб. 2).
+    external_ips = set(extra_ips)
 
     # Происхождение всех IP из CIDR помечаем как 'cidr' (не понижая именованные).
     # IP из доменов — с их источником (domain|subdomain).
@@ -630,7 +659,10 @@ def run_scan(target_id, profile="stealth", ports=None, top_ports=DEFAULT_TOP_POR
     target_spec = target["cidr"]
     if extra_ips:
         target_spec = target_spec + " " + " ".join(extra_ips)
-        print(f"[*] Добавлено IP из доменов: {len(extra_ips)}")
+        log(f"[*] Добавлено внешних IP из доменов (ВНЕ периметра Palo Alto): "
+            f"{len(extra_ips)} — {', '.join(extra_ips)}")
+        log("[*] Для этих IP НЕ учитывается SYN-flood/SYN-cookie защита (треб. 2): "
+            "открытый порт = подтверждён, web-проверка углублённая.")
 
     cmd = build_nmap_cmd(target_spec, xml_out, profile, ports,
                          top_ports, full_ports, extra_nse, syn_mode)
@@ -643,33 +675,43 @@ def run_scan(target_id, profile="stealth", ports=None, top_ports=DEFAULT_TOP_POR
                                            dig_rdns=dig_rdns, dns_brute=dns_brute)
     run_id = db.create_run(target_id, started, f"{profile}/{syn_mode}", cmd_str,
                            scan_class=scan_class, options_json=options_json)
-    print(f"[*] Запуск #{run_id} для {target['name']} ({target['cidr']})")
-    print(f"[*] Команда: {cmd_str}")
+    # Привязываем run_id к логу (имя логгера уже создано; работаем дальше).
+    slog.run_id = run_id
+    log(f"[*] Запуск #{run_id} для {target['name']} ({target['cidr']})")
+    log(f"[*] Команда nmap: {cmd_str}")
 
     if dry_run:
-        print("[dry-run] nmap не запускается, выводится только командная строка.")
+        log("[dry-run] nmap не запускается, выводится только командная строка.")
         db.finish_run(run_id, "done", dt.datetime.now().isoformat(timespec="seconds"),
                       0, "dry-run")
         diff_engine.update_host_states(target_id, run_id, scan_class=scan_class)
+        slog.close()
         return run_id
 
     if not which_or_die("nmap"):
         db.finish_run(run_id, "error",
                       dt.datetime.now().isoformat(timespec="seconds"), 0,
                       "nmap не установлен")
+        slog.close()
         raise SystemExit("nmap отсутствует")
 
     log_lines = []
+    # Треб. 7: запуск nmap с ПОТОКОВЫМ выводом в консоль и лог.
+    slog.section("ЗАПУСК NMAP (потоковый вывод, треб. 7)")
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60 * 90)
-        log_lines.append(proc.stdout[-4000:])
+        # Добавляем --stats-every для периодического прогресса в реальном времени.
+        stream_cmd = cmd + ["--stats-every", "10s"]
+        proc = logsetup.run_streamed(stream_cmd, timeout=60 * 90, slog=slog,
+                                     label="nmap")
+        log_lines.append((proc.stdout or "")[-4000:])
         if proc.returncode != 0:
-            log_lines.append("STDERR:\n" + proc.stderr[-2000:])
+            log_lines.append(f"nmap завершился с кодом {proc.returncode}")
     except subprocess.TimeoutExpired:
         log_lines.append("nmap: превышен общий таймаут")
     except Exception as e:  # noqa: BLE001
         db.finish_run(run_id, "error",
                       dt.datetime.now().isoformat(timespec="seconds"), 0, str(e))
+        slog.close()
         raise
 
     hosts_up = 0
@@ -709,10 +751,23 @@ def run_scan(target_id, profile="stealth", ports=None, top_ports=DEFAULT_TOP_POR
                                   scanned_at, alive_no_ports=1 if is_anp else 0)
             if is_anp:
                 anp_hosts.append((host_id, h["ip"]))
+            # Треб. 2: внешние IP (из DNS-обогащения) — ВНЕ периметра Palo Alto.
+            # Для них SYN-flood/SYN-cookie защита не учитывается: открытый порт
+            # считается подтверждённым, метка 'syncookie_suspect' снимается.
+            is_external = h["ip"] in external_ips
+            ports_info = []  # список словарей портов для CVE-анализа
             for p in h["ports"]:
+                conf = p["confidence"]
+                if is_external and p["state"] == "open" and conf == "syncookie_suspect":
+                    conf = "confirmed"
                 db.add_port(host_id, p["port"], p["proto"], p["state"],
                             p["service"], p["product"], p["version"],
-                            p["extrainfo"], p["confidence"])
+                            p["extrainfo"], conf)
+                ports_info.append({
+                    "port": p["port"], "proto": p["proto"],
+                    "service": p["service"], "product": p["product"],
+                    "version": p["version"], "extrainfo": p["extrainfo"],
+                })
 
             # Web-ресурсы — для портов с http/https/web-сервисами
             if do_web:
@@ -737,7 +792,9 @@ def run_scan(target_id, profile="stealth", ports=None, top_ports=DEFAULT_TOP_POR
                             vfindings = webscan.assess_vulns(
                                 info["url"], server=info.get("server", ""),
                                 tech=info.get("tech", ""), heavy=heavy,
-                                log=print)
+                                log=log, external=is_external,
+                                cve_online=cve_online, cve_vulners=cve_vulners,
+                                ports_info=ports_info)
                         except Exception as e:  # noqa: BLE001
                             vfindings = []
                             log_lines.append(
@@ -749,20 +806,24 @@ def run_scan(target_id, profile="stealth", ports=None, top_ports=DEFAULT_TOP_POR
                                 detail=vf.get("detail", ""),
                                 recommendation=vf.get("recommendation", ""),
                                 tool=vf.get("tool", ""),
-                                url=vf.get("url", info["url"]))
+                                url=vf.get("url", info["url"]),
+                                severity_reason=vf.get("severity_reason", ""),
+                                cve_id=vf.get("cve_id", ""),
+                                cvss=vf.get("cvss", ""),
+                                cve_source=vf.get("cve_source", ""))
         # --- alive_no_ports advanced check -------------------------------
         # Если включена галочка/флаг, по каждому "живому без портов" узлу
         # выполняем углублённую перепроверку (3 команды nmap) и сохраняем
         # текстовое пояснение в hosts.advanced_note.
         if advanced_anp and anp_hosts:
-            print(f"[*] alive_no_ports advanced check: {len(anp_hosts)} узл(ов) ...")
+            log(f"[*] alive_no_ports advanced check: {len(anp_hosts)} узл(ов) ...")
             log_lines.append(
                 f"alive_no_ports advanced check включён: проверяется "
                 f"{len(anp_hosts)} узл(ов).")
             # В основном скане (main) — ограниченный режим (bounded), чтобы не висеть.
             bounded = (scan_class == "main")
             for host_id, ip in anp_hosts:
-                print(f"    [+] углублённая проверка {ip} ...")
+                log(f"    [+] углублённая проверка {ip} ...")
                 try:
                     note = advanced_check_alive_no_ports(ip, bounded=bounded)
                 except Exception as e:  # noqa: BLE001
@@ -781,7 +842,17 @@ def run_scan(target_id, profile="stealth", ports=None, top_ports=DEFAULT_TOP_POR
 
     # Пересчёт состояния узлов и отличий (только в рамках этого класса)
     diff_engine.update_host_states(target_id, run_id, scan_class=scan_class)
-    print(f"[+] Запуск #{run_id} ({scan_class}) завершён. Узлов up: {hosts_up}.")
+
+    # Треб. 7: итоговое сообщение о завершении сканирования объекта.
+    try:
+        vc = db.vuln_severity_counts(run_id)
+    except Exception:  # noqa: BLE001
+        vc = {"crit": 0, "warn": 0, "info": 0}
+    slog.section(
+        f"✓ Сканирование объекта «{target['name']}» (запуск #{run_id}, {scan_class}) завершено: "
+        f"узлов up {hosts_up}; уязвимостей — крит. {vc.get('crit', 0)}, "
+        f"предупр. {vc.get('warn', 0)}, инфо {vc.get('info', 0)}")
+    slog.close()
     return run_id
 
 
@@ -815,6 +886,20 @@ def main():
                     help="Brute-force перебор поддоменов словарём "
                          "(dnsmap/dnsenum/dnsrecon); медленнее, но полнее. "
                          "По умолчанию — быстрый/пассивный режим")
+    # Треб. 3б: в РАСШИРЕННОМ скане CVE-проверки — опции (вкл/выкл).
+    # В ОСНОВНОМ скане они всегда включены (MAIN_PRESET).
+    ap.add_argument("--cve-online", dest="cve_online", action="store_true",
+                    default=True,
+                    help="Онлайн-запрос CVE к NVD/OSV API по версиям ПО "
+                         "(расширенный скан; вкл. по умолчанию)")
+    ap.add_argument("--no-cve-online", dest="cve_online", action="store_false",
+                    help="Отключить онлайн-запрос CVE к NVD/OSV (расширенный скан)")
+    ap.add_argument("--vulners", dest="cve_vulners", action="store_true",
+                    default=True,
+                    help="nmap NSE vulners по версиям ПО "
+                         "(расширенный скан; вкл. по умолчанию)")
+    ap.add_argument("--no-vulners", dest="cve_vulners", action="store_false",
+                    help="Отключить nmap NSE vulners (расширенный скан)")
     ap.add_argument("--main", action="store_true",
                     help="ОСНОВНОЙ скан — фиксированный пресет (обход SYN-защиты, "
                          "balanced, NSE, web, alive_no_ports); прочие параметры игнорируются")
@@ -849,7 +934,8 @@ def main():
              top_ports=args.top_ports, full_ports=args.full_ports,
              extra_nse=args.extra_nse, do_web=not args.no_web, dry_run=args.dry_run,
              syn_mode=args.syn_mode, advanced_anp=args.advanced_anp,
-             dig_rdns=args.dig_rdns, dns_brute=args.dns_brute, scan_class="advanced")
+             dig_rdns=args.dig_rdns, dns_brute=args.dns_brute, scan_class="advanced",
+             cve_online=args.cve_online, cve_vulners=args.cve_vulners)
 
 
 if __name__ == "__main__":

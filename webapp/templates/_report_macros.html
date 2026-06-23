@@ -77,10 +77,11 @@
           {% endfor %}
           <span class="note-status"></span>
         </td>
-        <td>
+        <td class="ports-cell">
+          {# Треб. 1а: порты по 2 в строку (группируем попарно). #}
           {% for p in r.ports_disp %}
             {# Подсветка новых портов (требование 7) #}
-            <span class="port {{ 'suspect' if '[syncookie' in p or '[filtered' in p else 'ok' }}{% if r.hl_new_ports %} port-new{% endif %}">{{ p }}</span>
+            <span class="port {{ 'suspect' if '[syncookie' in p or '[filtered' in p else 'ok' }}{% if r.hl_new_ports %} port-new{% endif %}">{{ p }}</span>{% if loop.index is divisibleby 2 and not loop.last %}<br>{% endif %}
           {% endfor %}
           {% if r.advanced_note %}
             <details class="adv-note">
@@ -112,7 +113,17 @@
                     {{ v.title }}
                     {% if v.tool %}<span class="hint">[{{ v.tool }}]</span>{% endif %}
                   </div>
+                  {# Треб. 3б: блок CVE — кликабельный идентификатор, CVSS, источник. #}
+                  {% if v.cve_id %}
+                  <div class="vuln-cve">
+                    {% if v.nvd_url %}<a href="{{ v.nvd_url }}" target="_blank" rel="noopener" class="cve-link">{{ v.cve_id }}</a>{% else %}<span class="cve-link">{{ v.cve_id }}</span>{% endif %}
+                    {% if v.cvss %}<span class="cve-cvss">CVSS {{ v.cvss }}</span>{% endif %}
+                    {% if v.cve_source %}<span class="hint">({{ v.cve_source }})</span>{% endif %}
+                  </div>
+                  {% endif %}
                   {% if v.detail %}<div class="vuln-detail">{{ v.detail }}</div>{% endif %}
+                  {# Треб. 3а: обоснование выбранного уровня severity. #}
+                  {% if v.severity_reason %}<div class="vuln-sevreason"><span class="hint">Обоснование severity:</span> {{ v.severity_reason }}</div>{% endif %}
                   {% if v.recommendation %}<div class="vuln-rec">→ {{ v.recommendation }}</div>{% endif %}
                 </div>
               {% endfor %}
@@ -122,9 +133,14 @@
         <td class="nowrap">{{ r.first_seen|fmtdate }}</td>
         <td class="nowrap">{{ r.prev_scanned_at|fmtdate }}</td>
         {# Подсветка примечания, если есть новые/пропавшие порты или смена присутствия #}
-        <td class="diff {% if r.hl_new_ip %}diff-new{% elif r.hl_gone_ip %}diff-gone{% elif r.hl_new_ports %}diff-portnew{% elif r.hl_gone_ports %}diff-portgone{% endif %}">{{ r.diff_prev_text }}</td>
+        {# Треб. 1а: каждый блок отличия — на отдельной строке. #}
+        <td class="diff {% if r.hl_new_ip %}diff-new{% elif r.hl_gone_ip %}diff-gone{% elif r.hl_new_ports %}diff-portnew{% elif r.hl_gone_ports %}diff-portgone{% endif %}">
+          {% for line in r.diff_prev_lines %}<div>{{ line }}</div>{% endfor %}
+        </td>
         <td class="nowrap">{{ r.prev2_scanned_at|fmtdate }}</td>
-        <td class="diff">{{ r.diff_prev2_text }}</td>
+        <td class="diff">
+          {% for line in r.diff_prev2_lines %}<div>{{ line }}</div>{% endfor %}
+        </td>
       </tr>
     {% endfor %}
     </tbody>

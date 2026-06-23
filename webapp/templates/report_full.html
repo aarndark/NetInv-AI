@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="ru">
+{# Треб. 1г: отдельное окно/вкладка с отчётом на весь экран.
+   Самостоятельная страница (без base.html): таблица растянута по окну,
+   sticky-заголовки, всегда видимые полосы прокрутки, прокрутка стрелками. #}
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Отчёт (полный экран) — {{ target.name }}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body class="fullreport-body">
+  {% from "_report_macros.html" import report_table %}
+
+  <header class="fullreport-bar">
+    <div class="fullreport-title">
+      <strong>🛰️ NetInv</strong>
+      <span>Отчёт: {{ target.name }} (<code>{{ target.cidr }}</code>)</span>
+      <span class="badge {{ 'cls-main' if scan_class=='main' else 'cls-adv' }}">
+        {{ 'основное' if scan_class=='main' else 'расширенное' }}</span>
+    </div>
+    {# Треб. 1г: краткая сводка в шапке отдельного окна. #}
+    <div class="report-summary">
+      <span class="sum-chip">Всего узлов: <strong>{{ summary.total }}</strong></span>
+      <span class="sum-chip sum-live">«живые»: <strong>{{ summary.live }}</strong></span>
+      <span class="sum-chip sum-palo">Palo Alto: <strong>{{ summary.palo }}</strong></span>
+      {% if summary.crit %}<span class="sum-chip sum-crit">критичные: <strong>{{ summary.crit }}</strong></span>{% endif %}
+      {% if summary.warn %}<span class="sum-chip sum-warn">предупр.: <strong>{{ summary.warn }}</strong></span>{% endif %}
+      {% if summary.info %}<span class="sum-chip sum-info">инфо: <strong>{{ summary.info }}</strong></span>{% endif %}
+    </div>
+    <div class="fullreport-actions">
+      <a class="btn" href="{{ url_for('report_csv', target_id=target.id, scan_class=scan_class) }}">⬇ CSV</a>
+      <a class="btn" href="{{ url_for('report', target_id=target.id, scan_class=scan_class) }}">← К обычному виду</a>
+    </div>
+  </header>
+
+  {% if not rows %}
+    <p class="muted" style="padding:18px">Результатов пока нет.</p>
+  {% else %}
+  <main class="fullreport-main">
+    <h3 class="section-title live">✅ Гарантированно «живые» хосты ({{ live_rows|length }})</h3>
+    {% if live_rows %}
+      {{ report_table(live_rows, tkey='full-live-' ~ scan_class, editable=false) }}
+    {% else %}
+      <p class="muted">Нет хостов с подтверждёнными сервисами.</p>
+    {% endif %}
+
+    <h3 class="section-title palo">⚠ Возможные артефакты защиты Palo Alto ({{ palo_rows|length }})</h3>
+    {% if palo_rows %}
+      {{ report_table(palo_rows, tkey='full-palo-' ~ scan_class, editable=false) }}
+    {% else %}
+      <p class="muted">Нет узлов-кандидатов на артефакты Palo Alto.</p>
+    {% endif %}
+  </main>
+  {% endif %}
+
+  <script src="{{ url_for('static', filename='table-resize.js') }}"></script>
+  <script>
+  // Треб. 1г: прокрутка таблицы стрелками клавиатуры.
+  // Фокусируем контейнер прокрутки под курсором; стрелки/PageUp/Down/Home/End.
+  (function () {
+    var scrollers = document.querySelectorAll('.table-scroll');
+    scrollers.forEach(function (sc) {
+      sc.setAttribute('tabindex', '0');  // делаем фокусируемым
+      sc.addEventListener('mouseenter', function () { sc.focus(); });
+    });
+    document.addEventListener('keydown', function (e) {
+      var sc = document.activeElement;
+      if (!sc || !sc.classList || !sc.classList.contains('table-scroll')) {
+        // если фокус не на контейнере — берём первый видимый
+        sc = document.querySelector('.table-scroll');
+        if (!sc) return;
+      }
+      var stepX = 80, stepY = 60;
+      switch (e.key) {
+        case 'ArrowLeft':  sc.scrollLeft -= stepX; e.preventDefault(); break;
+        case 'ArrowRight': sc.scrollLeft += stepX; e.preventDefault(); break;
+        case 'ArrowUp':    window.scrollBy(0, -stepY); e.preventDefault(); break;
+        case 'ArrowDown':  window.scrollBy(0, stepY); e.preventDefault(); break;
+        case 'PageUp':     window.scrollBy(0, -window.innerHeight * 0.85); e.preventDefault(); break;
+        case 'PageDown':   window.scrollBy(0, window.innerHeight * 0.85); e.preventDefault(); break;
+        case 'Home':       sc.scrollLeft = 0; e.preventDefault(); break;
+        case 'End':        sc.scrollLeft = sc.scrollWidth; e.preventDefault(); break;
+      }
+    });
+  })();
+  </script>
+</body>
+</html>

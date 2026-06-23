@@ -104,6 +104,12 @@
               <label class="chk" title="Brute-force перебор поддоменов словарём (dnsmap/dnsenum/dnsrecon). По умолчанию — быстрый/пассивный режим. Применяется к привязанным доменам 2-го уровня.">
                 <input type="checkbox" name="dns_brute"> Brute-force поддоменов
               </label>
+              <label class="chk" title="Онлайн-запрос CVE к NVD/OSV API по версиям ПО. В основном скане включён всегда; здесь — опция.">
+                <input type="checkbox" name="cve_online" checked> CVE: онлайн NVD/OSV
+              </label>
+              <label class="chk" title="nmap NSE vulners по версиям ПО. В основном скане включён всегда; здесь — опция.">
+                <input type="checkbox" name="cve_vulners" checked> CVE: nmap vulners
+              </label>
               <button type="submit" class="btn">▶ Расширенный скан</button>
             </form>
           </details>

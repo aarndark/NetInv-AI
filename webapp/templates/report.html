@@ -1,5 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Отчёт — {{ target.name }}{% endblock %}
+{# Треб. 1в: страница отчёта почти на всю ширину браузера. #}
+{% block body_class %}report-page{% endblock %}
 {% block content %}
 
 {# Требование 2/3/4/5: макрос таблицы отчёта вынесен в отдельный файл,
@@ -39,8 +41,24 @@
         </form>
       {% endif %}
       <a class="btn" href="{{ url_for('report_csv', target_id=target.id, scan_class=scan_class) }}">⬇ CSV</a>
+      {# Треб. 1г: открыть полный отчёт в отдельном окне/вкладке. #}
+      <a class="btn" target="_blank" rel="noopener"
+         href="{{ url_for('report_full', target_id=target.id, scan_class=scan_class) }}"
+         title="Открыть таблицу на весь экран в отдельном окне">⧉ Открыть в отдельном окне</a>
     </div>
   </div>
+
+  {# Треб. 1г: краткая сводка по отчёту на главной странице. #}
+  {% if rows %}
+  <div class="report-summary">
+    <span class="sum-chip">Всего узлов: <strong>{{ summary.total }}</strong></span>
+    <span class="sum-chip sum-live">«живые»: <strong>{{ summary.live }}</strong></span>
+    <span class="sum-chip sum-palo">артефакты Palo Alto: <strong>{{ summary.palo }}</strong></span>
+    {% if summary.crit %}<span class="sum-chip sum-crit">критичные: <strong>{{ summary.crit }}</strong></span>{% endif %}
+    {% if summary.warn %}<span class="sum-chip sum-warn">предупр.: <strong>{{ summary.warn }}</strong></span>{% endif %}
+    {% if summary.info %}<span class="sum-chip sum-info">инфо: <strong>{{ summary.info }}</strong></span>{% endif %}
+  </div>
+  {% endif %}
 
   <p class="muted">
     Класс статистики:

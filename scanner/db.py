@@ -250,6 +250,12 @@ CREATE TABLE IF NOT EXISTS vulns (
     detail          TEXT,                       -- подробности (что найдено)
     recommendation  TEXT,                       -- авто-рекомендация по устранению
     tool            TEXT,                       -- инструмент-источник
+    severity_reason TEXT,                       -- обоснование уровня severity (треб. 3)
+    -- CVE-сведения (требование 3б): сопоставление версии ПО с известными
+    -- уязвимостями (offline-таблица + онлайн NVD/OSV + nmap NSE vulners).
+    cve_id          TEXT,                       -- идентификатор(ы) CVE (через запятую)
+    cvss            TEXT,                       -- оценка CVSS (например, 9.8)
+    cve_source      TEXT,                       -- источник: offline|nvd|osv|vulners
     created_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -299,6 +305,12 @@ def _migrate(c):
         c.execute("ALTER TABLE scan_runs ADD COLUMN scan_class TEXT NOT NULL DEFAULT 'main'")
     if "options_json" not in rcols:
         c.execute("ALTER TABLE scan_runs ADD COLUMN options_json TEXT")
+
+    # vulns: обоснование severity и CVE-сведения (требования 3, 3б).
+    vcols = {r["name"] for r in c.execute("PRAGMA table_info(vulns)")}
+    for col in ("severity_reason", "cve_id", "cvss", "cve_source"):
+        if col not in vcols:
+            c.execute(f"ALTER TABLE vulns ADD COLUMN {col} TEXT")
 
     # host_state: класс сканирования и признак присутствия.
     # ВНИМАНИЕ: в старой схеме был UNIQUE(target_id, ip); добавление
@@ -807,15 +819,22 @@ def set_ip_attributes(target_id, ip, admins=None, **flags):
 # ----------------------- vulns (уязвимости web-ресурсов) -----------------------
 
 def add_vuln(host_id, severity, category, title, detail="", recommendation="",
-             tool="", url=""):
-    """Сохранить одну находку уязвимости/наблюдения для узла (требование 5)."""
+             tool="", url="", severity_reason="", cve_id="", cvss="",
+             cve_source=""):
+    """Сохранить одну находку уязвимости/наблюдения для узла (требования 5, 3, 3б).
+
+    severity_reason — обоснование выбранного уровня severity (треб. 3);
+    cve_id/cvss/cve_source — сведения о CVE для версии ПО (треб. 3б).
+    """
     if severity not in ("critical", "warning", "info"):
         severity = "info"
     with _LOCK, connect() as c:
         c.execute(
             "INSERT INTO vulns(host_id, url, severity, category, title, detail, "
-            "recommendation, tool) VALUES (?,?,?,?,?,?,?,?)",
-            (host_id, url, severity, category, title, detail, recommendation, tool))
+            "recommendation, tool, severity_reason, cve_id, cvss, cve_source) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (host_id, url, severity, category, title, detail, recommendation,
+             tool, severity_reason, cve_id, cvss, cve_source))
         c.commit()
 
 
@@ -831,6 +850,29 @@ def vulns_for_host(host_id):
     rows.sort(key=lambda r: (_SEV_ORDER.get(r.get("severity"), 9),
                              r.get("category") or "", r.get("title") or ""))
     return rows
+
+
+def vuln_severity_counts(run_id):
+    """Сводка по уровням severity для всех узлов запуска (треб. 7).
+
+    Возвращает dict с ключами crit/warn/info — число находок каждого
+    уровня, собранных по всем узлам данного запуска.
+    """
+    with connect() as c:
+        rows = c.execute(
+            "SELECT v.severity AS sev, COUNT(*) AS n FROM vulns v "
+            "JOIN hosts h ON h.id = v.host_id "
+            "WHERE h.run_id=? GROUP BY v.severity", (run_id,)).fetchall()
+    out = {"crit": 0, "warn": 0, "info": 0}
+    for r in rows:
+        sev = r["sev"]
+        if sev == "critical":
+            out["crit"] = r["n"]
+        elif sev == "warning":
+            out["warn"] = r["n"]
+        else:
+            out["info"] = r["n"]
+    return out
 
 
 # ----------------------- users (авторизация) -----------------------
