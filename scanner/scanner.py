@@ -49,6 +49,7 @@ import webscan  # noqa: E402
 import dns_recon  # noqa: E402
 import logsetup  # noqa: E402
 import preflight  # noqa: E402
+import cve_lookup  # noqa: E402
 
 
 # Профили таймингов, согласованные с защитой Palo Alto SYN Flood.
@@ -102,6 +103,9 @@ MAIN_PRESET = {
     # CVE-проверки (треб. 3б): В ОСНОВНОМ скане ВКЛЮЧЕНЫ ПО УМОЛЧАНИЮ.
     "cve_online": True,        # онлайн-запрос NVD/OSV по версиям ПО
     "cve_vulners": True,       # nmap NSE vulners по версиям ПО
+    # Фильтр находок уровня «инфо» (треб. 6 v1.5.0): в ОСНОВНОМ скане
+    # информационные находки НЕ фиксируются (только реальные уязвимости).
+    "include_info": False,
 }
 
 # Режимы по отношению к защите Palo Alto SYN Flood / SYN Cookies.
@@ -604,14 +608,21 @@ def collect_domain_targets(target_id, dns_brute=False, log=None):
 def run_scan(target_id, profile="stealth", ports=None, top_ports=DEFAULT_TOP_PORTS,
              full_ports=False, extra_nse=False, do_web=True, dry_run=False,
              syn_mode="evasion", advanced_anp=False, scan_class="advanced",
-             dig_rdns=False, dns_brute=False, cve_online=True, cve_vulners=True):
+             dig_rdns=False, dns_brute=False, cve_online=True, cve_vulners=True,
+             include_info=False):
     """Полный цикл: nmap -> парсинг -> сохранение -> web-сканирование -> diff.
 
     scan_class: 'main' (основной, фиксированный пресет) либо 'advanced'
     (расширенный). Статистика и «Отличия» ведутся ОТДЕЛЬНО по классу.
 
     dns_brute: включить brute-force перебор поддоменов (медленнее, полнее).
+
+    include_info (треб. 6 v1.5.0): фиксировать ли находки уровня «инфо».
+    По умолчанию False — информационные находки НЕ сохраняются в БД
+    (в ОСНОВНОМ скане и без галочки в расширенном). При True фиксируются все.
     """
+    # Нормализуем имя уровня «инфо» для фильтрации (треб. 6).
+    _INFO_SEVERITIES = {"info", "инфо", "informational"}
     db.init_db()
     target = db.get_target(target_id)
     if not target:
@@ -637,6 +648,13 @@ def run_scan(target_id, profile="stealth", ports=None, top_ports=DEFAULT_TOP_POR
         log("nmap NSE vulners не обнаружен — сопоставление CVE через vulners "
             "пропущено (offline-таблица и онлайн NVD/OSV работают).")
         cve_vulners = False
+
+    # Однократная проверка доступности OSV при запуске (треб. 5 v1.5.0).
+    # Делается ОДИН раз за скан, чтобы в терминал не сыпались однотипные
+    # ошибки «Connection refused» на каждый продукт. Если OSV недоступен,
+    # онлайн-запросы пропускаются, работает offline-таблица (graceful).
+    if cve_online:
+        cve_lookup.osv_healthcheck(log=log)
 
     started = dt.datetime.now().isoformat(timespec="seconds")
     xml_fd, xml_out = tempfile.mkstemp(suffix=".xml", prefix="nmap_")
@@ -800,6 +818,13 @@ def run_scan(target_id, profile="stealth", ports=None, top_ports=DEFAULT_TOP_POR
                             log_lines.append(
                                 f"assess_vulns({info['url']}) ошибка: {e}")
                         for vf in vfindings:
+                            # Фильтр уровня «инфо» (треб. 6 v1.5.0): если
+                            # include_info=False, информационные находки
+                            # НЕ фиксируем (в БД попадают только реальные
+                            # уязвимости: warning/critical и выше).
+                            _sev = str(vf.get("severity", "info")).strip().lower()
+                            if not include_info and _sev in _INFO_SEVERITIES:
+                                continue
                             db.add_vuln(
                                 host_id, vf.get("severity", "info"),
                                 vf.get("category"), vf.get("title", ""),
@@ -900,6 +925,11 @@ def main():
                          "(расширенный скан; вкл. по умолчанию)")
     ap.add_argument("--no-vulners", dest="cve_vulners", action="store_false",
                     help="Отключить nmap NSE vulners (расширенный скан)")
+    # Треб. 6 v1.5.0: фиксация находок уровня «инфо» (по умолч. выкл.).
+    ap.add_argument("--include-info", dest="include_info", action="store_true",
+                    default=False,
+                    help="Фиксировать находки уровня «инфо» (расширенный скан; "
+                         "по умолчанию инфо-находки НЕ сохраняются, как и в основном)")
     ap.add_argument("--main", action="store_true",
                     help="ОСНОВНОЙ скан — фиксированный пресет (обход SYN-защиты, "
                          "balanced, NSE, web, alive_no_ports); прочие параметры игнорируются")
@@ -935,7 +965,8 @@ def main():
              extra_nse=args.extra_nse, do_web=not args.no_web, dry_run=args.dry_run,
              syn_mode=args.syn_mode, advanced_anp=args.advanced_anp,
              dig_rdns=args.dig_rdns, dns_brute=args.dns_brute, scan_class="advanced",
-             cve_online=args.cve_online, cve_vulners=args.cve_vulners)
+             cve_online=args.cve_online, cve_vulners=args.cve_vulners,
+             include_info=args.include_info)
 
 
 if __name__ == "__main__":

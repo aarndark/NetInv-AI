@@ -105,7 +105,7 @@ def logout():
 
 def _bg_scan(target_id, profile, ports, top_ports, full_ports, extra_nse, do_web,
              syn_mode, advanced_anp, dig_rdns=False, dns_brute=False,
-             cve_online=True, cve_vulners=True):
+             cve_online=True, cve_vulners=True, include_info=False):
     """Фоновый РАСШИРЕННЫЙ скан (scan_class='advanced')."""
     try:
         scanner.run_scan(target_id, profile=profile, ports=ports or None,
@@ -113,7 +113,8 @@ def _bg_scan(target_id, profile, ports, top_ports, full_ports, extra_nse, do_web
                          extra_nse=extra_nse, do_web=do_web, syn_mode=syn_mode,
                          advanced_anp=advanced_anp, dig_rdns=dig_rdns,
                          dns_brute=dns_brute, scan_class="advanced",
-                         cve_online=cve_online, cve_vulners=cve_vulners)
+                         cve_online=cve_online, cve_vulners=cve_vulners,
+                         include_info=include_info)
     except Exception as e:  # noqa: BLE001
         app.logger.error("advanced scan failed: %s", e)
 
@@ -232,11 +233,15 @@ def start_advanced_scan(target_id):
     # Треб. 3б: в расширенном скане CVE-проверки — опциональны (галочки).
     cve_online = request.form.get("cve_online") == "on"
     cve_vulners = request.form.get("cve_vulners") == "on"
+    # Треб. 6 v1.5.0: фиксация находок уровня «инфо» — только по галочке
+    # (по умолчанию выкл.). В основном скане инфо-находки не фиксируются всегда.
+    include_info = request.form.get("include_info") == "on"
 
     t = threading.Thread(
         target=_bg_scan,
         args=(target_id, profile, ports, top_ports, full_ports, extra_nse, do_web,
-              syn_mode, advanced_anp, dig_rdns, dns_brute, cve_online, cve_vulners),
+              syn_mode, advanced_anp, dig_rdns, dns_brute, cve_online, cve_vulners,
+              include_info),
         daemon=True,
     )
     t.start()

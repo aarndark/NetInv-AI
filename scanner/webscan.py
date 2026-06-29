@@ -19,13 +19,20 @@ import string
 import subprocess
 
 import vuln_rules
+import toolpath
 
-CURL = shutil.which("curl")
-WHATWEB = shutil.which("whatweb")
-NIKTO = shutil.which("nikto")
-NMAP = shutil.which("nmap")
-WPSCAN = shutil.which("wpscan")
-DALFOX = shutil.which("dalfox")
+# Требование 2 v1.5.0: расширяем PATH процесса типовыми каталогами установки
+# (go/bin, snap, /usr/local/bin), чтобы dalfox и др. находились даже когда
+# NetInv запущен под web/cron-пользователем без них в PATH.
+toolpath.augment_path()
+
+# Поиск утилит — через toolpath.which (PATH + типовые каталоги установки).
+CURL = toolpath.which("curl")
+WHATWEB = toolpath.which("whatweb")
+NIKTO = toolpath.which("nikto")
+NMAP = toolpath.which("nmap")
+WPSCAN = toolpath.which("wpscan")
+DALFOX = toolpath.which("dalfox")
 
 _TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
 

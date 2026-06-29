@@ -110,6 +110,9 @@
               <label class="chk" title="nmap NSE vulners по версиям ПО. В основном скане включён всегда; здесь — опция.">
                 <input type="checkbox" name="cve_vulners" checked> CVE: nmap vulners
               </label>
+              <label class="chk" title="Фиксировать находки уровня «инфо» (низкая значимость: заголовки сервера, информационные признаки). По умолчанию выкл. и в основном скане НЕ фиксируются.">
+                <input type="checkbox" name="include_info"> Фиксировать находки уровня «инфо»
+              </label>
               <button type="submit" class="btn">▶ Расширенный скан</button>
             </form>
           </details>

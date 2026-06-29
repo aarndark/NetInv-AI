@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Значок NetInv (требование 4 v1.5.0): спутниковая тарелка + сигнал на
+     тёмном фоне. SVG масштабируется без потери качества для вкладки,
+     закладок и ярлыков. PNG-фолбэк (favicon-32.png) — для старых браузеров. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0d2b36"/>
+      <stop offset="1" stop-color="#06414f"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Фон: тёмный скруглённый квадрат с тонкой бирюзовой рамкой -->
+  <rect x="2" y="2" width="60" height="60" rx="13" fill="url(#bg)"/>
+  <rect x="2.5" y="2.5" width="59" height="59" rx="12.5" fill="none"
+        stroke="#22d3ee" stroke-opacity="0.45" stroke-width="1"/>
+
+  <!-- Сигнальные волны (радиоразведка периметра) -->
+  <g fill="none" stroke="#5ee7ff" stroke-linecap="round">
+    <path d="M38 16 a18 18 0 0 1 0 32" stroke-width="3" stroke-opacity="0.95"/>
+    <path d="M44 11 a25 25 0 0 1 0 42" stroke-width="3" stroke-opacity="0.55"/>
+  </g>
+
+  <!-- Спутниковая тарелка (светлая, высокий контраст к фону) -->
+  <g>
+    <!-- чаша антенны -->
+    <path d="M12 46 A20 20 0 0 1 36 22 L18 40 A3 3 0 0 1 12 46 Z"
+          fill="#e8fbff" stroke="#22d3ee" stroke-width="1.5"
+          stroke-linejoin="round"/>
+    <!-- штанга облучателя -->
+    <line x1="30" y1="28" x2="22" y2="36" stroke="#0d2b36" stroke-width="3"
+          stroke-linecap="round"/>
+    <!-- облучатель -->
+    <circle cx="30" cy="28" r="3.2" fill="#22d3ee" stroke="#0d2b36"
+            stroke-width="1.5"/>
+    <!-- опора антенны -->
+    <line x1="18" y1="42" x2="16" y2="52" stroke="#e8fbff" stroke-width="3.5"
+          stroke-linecap="round"/>
+    <line x1="11" y1="52" x2="23" y2="52" stroke="#e8fbff" stroke-width="3.5"
+          stroke-linecap="round"/>
+  </g>
+</svg>

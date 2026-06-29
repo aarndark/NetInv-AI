@@ -26,6 +26,7 @@ import json
 import os
 import re
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -38,6 +39,79 @@ _USER_AGENT = "NetInvScanner/1.4 (CPT inventory; offline-first CVE)"
 
 NVD_URL = ("https://nvd.nist.gov/vuln/detail/")   # база для кликабельных ссылок
 OSV_API = "https://api.osv.dev/v1/query"
+OSV_HEALTH = "https://api.osv.dev"                # для проверки доступности
+
+# --- Прокси/VPN (требование 5 v1.5.0) -------------------------------------
+# Если прямой egress к api.osv.dev заблокирован (геоблокировки, firewall,
+# корпоративный периметр), запросы OSV можно направить через HTTP(S)-прокси
+# или VPN. Адрес прокси берётся из NETINV_HTTPS_PROXY, либо из штатных
+# HTTPS_PROXY/https_proxy. Пример: export NETINV_HTTPS_PROXY=http://127.0.0.1:8080
+# (для VPN прокси не нужен — достаточно поднять туннель до запуска скана).
+
+
+def _osv_proxy():
+    """Адрес HTTP(S)-прокси для запросов OSV (или None)."""
+    return (os.environ.get("NETINV_HTTPS_PROXY")
+            or os.environ.get("HTTPS_PROXY")
+            or os.environ.get("https_proxy")
+            or None)
+
+
+def _osv_opener():
+    """urllib-opener с учётом прокси (если задан) для запросов OSV."""
+    proxy = _osv_proxy()
+    if proxy:
+        handler = urllib.request.ProxyHandler({"http": proxy, "https": proxy})
+        return urllib.request.build_opener(handler)
+    # Без прокси — штатный опенер (учитывает системный VPN/маршруты).
+    return urllib.request.build_opener()
+
+
+# Однократная проверка доступности OSV за процесс (чтобы не спамить в лог).
+_OSV_REACHABLE = None        # None — ещё не проверяли; True/False — результат
+
+
+def osv_healthcheck(log=None, force=False):
+    """Однократная проверка доступности api.osv.dev при запуске скана.
+
+    Выполняется ОДИН раз за процесс (результат кешируется в _OSV_REACHABLE),
+    чтобы в терминал НЕ сыпались однотипные ошибки на каждый продукт.
+    При недоступности поясняет причину и подсказывает про VPN/прокси.
+
+    Возвращает True/False. force=True принудительно перепроверяет.
+    """
+    global _OSV_REACHABLE
+    if _OSV_REACHABLE is not None and not force:
+        return _OSV_REACHABLE
+
+    def _log(m):
+        if log:
+            log("[cve] " + m)
+
+    proxy = _osv_proxy()
+    proxy_note = f" через прокси {proxy}" if proxy else ""
+    # Лёгкий GET к корню API (дешёвле и не требует валидного payload).
+    req = urllib.request.Request(
+        OSV_HEALTH, headers={"User-Agent": _USER_AGENT})
+    try:
+        opener = _osv_opener()
+        with opener.open(req, timeout=_HTTP_TIMEOUT) as resp:
+            # Любой HTTP-ответ (вкл. 404 на корне) означает, что хост доступен.
+            _ = resp.status
+        _OSV_REACHABLE = True
+        _log(f"OSV доступен{proxy_note} — онлайн-поиск CVE включён.")
+    except urllib.error.HTTPError:
+        # HTTP-ошибка (напр. 404/405 на корне) = хост всё равно достижим.
+        _OSV_REACHABLE = True
+        _log(f"OSV доступен{proxy_note} — онлайн-поиск CVE включён.")
+    except Exception as e:  # noqa: BLE001
+        _OSV_REACHABLE = False
+        _log(f"OSV НЕДОСТУПЕН{proxy_note}: {e}")
+        _log("Причина: нет прямого выхода в Интернет (геоблокировки / firewall / "
+             "корпоративный периметр). Онлайн-CVE пропускаются, работает offline-таблица.")
+        _log("Решение: поднимите VPN либо задайте прокси: "
+             "export NETINV_HTTPS_PROXY=http://HOST:PORT  (см. README, раздел «Новое в 1.5.0»).")
+    return _OSV_REACHABLE
 
 
 # ==========================================================================
@@ -172,6 +246,10 @@ def lookup_osv(product, version, log=None):
     Запрос выполняется СО СТОРОНЫ СКАНЕРА (не через цель). Любая ошибка/таймаут
     → возвращается пустой список (graceful degradation). Результат кешируется.
     """
+    # Нормализуем вход: хвостовые пробелы в product/version — частая причина
+    # HTTP 400 Bad Request от OSV (требование 5 v1.5.0).
+    product = str(product or "").strip()
+    version = str(version or "").strip()
     if not product:
         return []
     cached = _cache_get(product, version)
@@ -182,19 +260,36 @@ def lookup_osv(product, version, log=None):
         if log:
             log("[cve] " + m)
 
+    # Если однократная проверка уже показала, что OSV недоступен — не дёргаем
+    # сеть на каждый продукт (иначе в лог сыпятся однотипные ошибки).
+    if _OSV_REACHABLE is False:
+        _cache_put(product, version, [])
+        return []
+
     findings = []
     # OSV принимает package.name + version; для нативного ПО точное сопоставление
     # ограничено, поэтому используем эвристический запрос по имени продукта.
-    payload = json.dumps({
-        "version": str(version or ""),
-        "package": {"name": str(product).lower()},
-    }).encode("utf-8")
+    # ФИКС HTTP 400 (требование 5): OSV возвращает 400 Bad Request, если в
+    # запросе передана ПУСТАЯ строка version (version: ""). Поэтому ключ
+    # version добавляем ТОЛЬКО при наличии непустой версии; иначе шлём только
+    # package.name (без версии OSV вернёт все известные CVE пакета).
+    query = {"package": {"name": product.lower()}}
+    if version:
+        query["version"] = version
+    payload = json.dumps(query).encode("utf-8")
     req = urllib.request.Request(
         OSV_API, data=payload,
         headers={"Content-Type": "application/json", "User-Agent": _USER_AGENT})
     try:
-        with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT) as resp:
+        opener = _osv_opener()
+        with opener.open(req, timeout=_HTTP_TIMEOUT) as resp:
             data = json.loads(resp.read().decode("utf-8", "replace"))
+    except urllib.error.HTTPError as e:
+        # 400 = OSV не понял запрос (неверный формат/неизвестный экосистема).
+        _log(f"OSV HTTP {e.code} для {product} {version or '(без версии)'} "
+             f"— пропускаю (используется offline)")
+        _cache_put(product, version, [])
+        return []
     except Exception as e:  # noqa: BLE001
         _log(f"OSV недоступен для {product} {version}: {e} (используется offline)")
         _cache_put(product, version, [])      # кешируем «пусто», чтобы не долбить сеть

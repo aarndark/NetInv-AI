@@ -53,10 +53,13 @@ PKGS=(nmap whatweb curl dnsutils python3 python3-venv python3-pip)
 # корректно, если какой-то из них не установлен, поэтому их установка
 # не обязательна и не прерывает установку при ошибке.
 # Сюда же входят утилиты базовой проверки web-уязвимостей (требование 5):
-# nikto, wpscan, dalfox. На Kali они доступны в репозиториях; на чистом
+# nikto, wpscan. На Kali они доступны в репозиториях; на чистом
 # Debian часть из них может отсутствовать — сканер работает и без них
 # (уязвимости проверяются доступными средствами: curl, nmap http-скрипты).
-OPT_PKGS=(dnsmap dnsenum dnsrecon nikto wpscan dalfox)
+# ВНИМАНИЕ: dalfox в apt-репозиториях Kali/Debian по умолчанию ОТСУТСТВУЕТ,
+# поэтому он НЕ входит в OPT_PKGS — его ставит отдельная секция ниже
+# (через go install либо snap), см. «# --- 2б. установка dalfox».
+OPT_PKGS=(dnsmap dnsenum dnsrecon nikto wpscan)
 MISSING=()
 for p in "${PKGS[@]}"; do
   if ! dpkg -s "$p" >/dev/null 2>&1; then
@@ -101,6 +104,97 @@ if [[ ${#OPT_MISSING[@]} -gt 0 ]]; then
   fi
 fi
 
+# --- 2б. установка dalfox (требование 1 v1.5.0) ----------------------------
+# dalfox — лёгкая проверка XSS. В apt-репозиториях Kali/Debian по умолчанию
+# его НЕТ, поэтому ставим одним из двух способов:
+#   1) ПРИОРИТЕТ — `go install github.com/hahwul/dalfox/v2@latest`
+#      (при отсутствии Go ставим пакет golang-go через apt);
+#   2) ФОЛБЭК   — `snap install dalfox` (при отсутствии snapd ставим snapd).
+# go install кладёт бинарник в $GOPATH/bin (обычно ~/go/bin или /root/go/bin),
+# поэтому в конце делаем симлинк в /usr/local/bin/dalfox — он гарантированно
+# в PATH у web/cron-процессов NetInv (требование 2). Установка может
+# запрашивать root — это ДОПУСТИМО. Любые сбои не прерывают установку:
+# сканер корректно деградирует без dalfox.
+install_dalfox() {
+  # Уже установлен и виден в PATH или в типовых каталогах? — выходим.
+  for cand in dalfox "$HOME/go/bin/dalfox" /root/go/bin/dalfox /snap/bin/dalfox /usr/local/bin/dalfox; do
+    if command -v "$cand" >/dev/null 2>&1 || [[ -x "$cand" ]]; then
+      ok "dalfox уже установлен ($cand)."
+      return 0
+    fi
+  done
+
+  log "Устанавливаю dalfox (лёгкая проверка XSS) ..."
+
+  # --- способ 1: go install -------------------------------------------------
+  if ! command -v go >/dev/null 2>&1; then
+    log "Go не найден — пробую установить пакет golang-go (нужен root) ..."
+    if [[ -n "$SUDO" || "${EUID:-$(id -u)}" -eq 0 ]]; then
+      DEBIAN_FRONTEND=noninteractive $SUDO apt-get install -y golang-go 2>/dev/null \
+        || warn "Не удалось поставить golang-go через apt — попробую snap."
+    else
+      warn "Нет root/sudo — пакет golang-go не установить; попробую snap."
+    fi
+  fi
+
+  if command -v go >/dev/null 2>&1; then
+    # GOBIN определяем явно, чтобы знать, куда лёг бинарник, и не зависеть от
+    # настроек окружения. Под sudo HOME может быть /root.
+    local gobin
+    gobin="$(go env GOBIN 2>/dev/null || true)"
+    if [[ -z "$gobin" ]]; then
+      gobin="$(go env GOPATH 2>/dev/null || echo "$HOME/go")/bin"
+    fi
+    log "go install github.com/hahwul/dalfox/v2@latest (каталог: $gobin) ..."
+    if GOBIN="$gobin" go install github.com/hahwul/dalfox/v2@latest 2>/dev/null; then
+      if [[ -x "$gobin/dalfox" ]]; then
+        # Симлинк в /usr/local/bin, чтобы dalfox был в PATH у любых процессов.
+        if [[ -n "$SUDO" || "${EUID:-$(id -u)}" -eq 0 ]]; then
+          $SUDO ln -sf "$gobin/dalfox" /usr/local/bin/dalfox 2>/dev/null \
+            && ok "dalfox установлен через go; симлинк: /usr/local/bin/dalfox -> $gobin/dalfox" \
+            || ok "dalfox установлен через go: $gobin/dalfox (симлинк не создан — добавьте $gobin в PATH)"
+        else
+          ok "dalfox установлен через go: $gobin/dalfox"
+          warn "Нет root — симлинк в /usr/local/bin не создан. Добавьте в PATH: export PATH=\"$gobin:\$PATH\""
+        fi
+        return 0
+      fi
+    fi
+    warn "go install dalfox не удался — пробую snap."
+  fi
+
+  # --- способ 2: snap install (фолбэк) -------------------------------------
+  if ! command -v snap >/dev/null 2>&1; then
+    log "snap не найден — пробую установить snapd (нужен root) ..."
+    if [[ -n "$SUDO" || "${EUID:-$(id -u)}" -eq 0 ]]; then
+      DEBIAN_FRONTEND=noninteractive $SUDO apt-get install -y snapd 2>/dev/null \
+        || warn "Не удалось поставить snapd через apt."
+    else
+      warn "Нет root/sudo — snapd не установить."
+    fi
+  fi
+
+  if command -v snap >/dev/null 2>&1; then
+    log "snap install dalfox ..."
+    if [[ -n "$SUDO" || "${EUID:-$(id -u)}" -eq 0 ]]; then
+      if $SUDO snap install dalfox 2>/dev/null; then
+        # snap-бинарники лежат в /snap/bin; симлинк для надёжности.
+        [[ -x /snap/bin/dalfox ]] && $SUDO ln -sf /snap/bin/dalfox /usr/local/bin/dalfox 2>/dev/null || true
+        ok "dalfox установлен через snap."
+        return 0
+      fi
+    fi
+    warn "snap install dalfox не удался."
+  fi
+
+  # --- не получилось ни одним способом -------------------------------------
+  warn "Не удалось установить dalfox автоматически — лёгкая проверка XSS будет пропущена."
+  warn "    Установите вручную:  go install github.com/hahwul/dalfox/v2@latest"
+  warn "    либо:                sudo snap install dalfox"
+  return 1
+}
+install_dalfox || true
+
 # --- проверка ключевых инструментов ---
 for t in nmap curl python3; do
   command -v "$t" >/dev/null 2>&1 || die "Не найден '$t' даже после установки. Установите вручную."
@@ -112,9 +206,16 @@ for dtool in dnsmap dnsenum dnsrecon; do
   command -v "$dtool" >/dev/null 2>&1 || warn "$dtool не найден — поиск поддоменов этой утилитой будет пропущен (установите пакет $dtool)."
 done
 # Утилиты базовой проверки web-уязвимостей (требование 5) — тоже опциональны.
-for wtool in nikto wpscan dalfox; do
+for wtool in nikto wpscan; do
   command -v "$wtool" >/dev/null 2>&1 || warn "$wtool не найден — углублённая проверка web-уязвимостей этой утилитой будет пропущена (базовые проверки curl/nmap работают всё равно)."
 done
+# dalfox ищем шире (в т.ч. в ~/go/bin, /snap/bin, /usr/local/bin), т.к. он
+# ставится не через apt и может быть не в PATH этой оболочки.
+if ! command -v dalfox >/dev/null 2>&1 \
+   && [[ ! -x "$HOME/go/bin/dalfox" ]] && [[ ! -x /root/go/bin/dalfox ]] \
+   && [[ ! -x /snap/bin/dalfox ]] && [[ ! -x /usr/local/bin/dalfox ]]; then
+  warn "dalfox не найден — лёгкая проверка XSS будет пропущена (см. секцию установки dalfox выше)."
+fi
 
 # --- 3. python venv + зависимости ---
 if [[ ! -d ".venv" ]]; then

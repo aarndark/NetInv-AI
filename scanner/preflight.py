@@ -22,6 +22,8 @@ import os
 import shutil
 import subprocess
 
+import toolpath  # расширенный поиск утилит (go/bin, snap, /usr/local/bin) — треб. 2 v1.5.0
+
 # Каждая запись: ключ -> словарь с описанием.
 #   bin         — имя исполняемого файла для shutil.which;
 #   required    — обязателен ли (True) или опционален (False);
@@ -134,9 +136,13 @@ def check_tools():
         "required_missing": [keys...],   # отсутствующие ОБЯЗАТЕЛЬНЫЕ
       }
     """
+    # Требование 2 v1.5.0: добавляем типовые каталоги установки в PATH процесса,
+    # чтобы проверка и последующий запуск видели dalfox/snap-утилиты.
+    toolpath.augment_path()
     available, missing, required_missing = [], [], []
     for key, meta in TOOLS.items():
-        path = shutil.which(meta["bin"])
+        # Ищем через toolpath.which: PATH + ~/go/bin, /root/go/bin, /snap/bin и т.п.
+        path = toolpath.which(meta["bin"])
         rec = {
             "key": key,
             "bin": meta["bin"],
@@ -176,7 +182,10 @@ def format_report(result):
         lines.append("  Найдены:")
         for r in avail:
             tag = "обязательная" if r["required"] else "опциональная"
-            lines.append(f"    [+] {r['bin']:<10} ({tag}) — {r['purpose']}")
+            # Показываем путь (треб. 2 v1.5.0): полезно видеть, что dalfox найден
+            # например в ~/go/bin, а не в системном PATH.
+            where = f"  ({r['path']})" if r.get("path") else ""
+            lines.append(f"    [+] {r['bin']:<10} ({tag}) — {r['purpose']}{where}")
 
     # NSE vulners — отдельной строкой.
     if result["nse_vulners"]:
