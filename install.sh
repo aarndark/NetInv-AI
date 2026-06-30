@@ -278,22 +278,40 @@ chmod u+rwx data 2>/dev/null || true
 # недоступности и его — на /tmp/netinv_logs. Переопределить путь можно
 # переменной окружения NETINV_LOG_DIR.
 LOG_DIR="/opt/netinv/logs"
+# Кто реально будет запускать NetInv (и писать логи): если ставим через
+# sudo — это SUDO_USER, иначе текущий пользователь.
+RUN_USER="${SUDO_USER:-$(id -un)}"
+RUN_GROUP="$(id -gn "$RUN_USER" 2>/dev/null || echo "$RUN_USER")"
 if [[ -n "$SUDO" || "${EUID:-$(id -u)}" -eq 0 ]]; then
   if $SUDO mkdir -p "$LOG_DIR" 2>/dev/null; then
-    # отдаём владение исходному пользователю, чтобы web/cron от обычного
-    # пользователя могли писать логи.
-    if [[ "${EUID:-$(id -u)}" -eq 0 && -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
-      LOG_OWNER="${SUDO_USER}:$(id -gn "${SUDO_USER}" 2>/dev/null || echo "${SUDO_USER}")"
-      chown -R "$LOG_OWNER" "$LOG_DIR" 2>/dev/null || true
+    # ВАЖНО: всегда отдаём владение пользователю запуска, иначе
+    # web/cron от обычного пользователя не смогут писать и логи
+    # «молча» уйдут в /tmp (именно эта проблема была у пользователя).
+    if [[ "$RUN_USER" != "root" ]]; then
+      $SUDO chown -R "${RUN_USER}:${RUN_GROUP}" "$LOG_DIR" 2>/dev/null || true
     fi
     $SUDO chmod 0775 "$LOG_DIR" 2>/dev/null || true
-    ok "Каталог логов готов: $LOG_DIR"
+    # Проверяем реальную возможность записи от имени RUN_USER.
+    if $SUDO -u "$RUN_USER" test -w "$LOG_DIR" 2>/dev/null \
+       || sudo -u "$RUN_USER" test -w "$LOG_DIR" 2>/dev/null; then
+      ok "Каталог логов готов и пишется пользователем $RUN_USER: $LOG_DIR"
+    else
+      ok "Каталог логов создан: $LOG_DIR (владелец ${RUN_USER}:${RUN_GROUP})"
+    fi
   else
     warn "Не удалось создать $LOG_DIR — логи будут писаться в <корень проекта>/logs (фолбэк)."
   fi
 else
   warn "Нет root/sudo — каталог $LOG_DIR не создан; логи пойдут в <корень проекта>/logs (фолбэк)."
   warn "    Чтобы использовать путь по умолчанию: sudo mkdir -p $LOG_DIR && sudo chown -R \$USER $LOG_DIR"
+fi
+# Если проект установлен НЕ в /opt/netinv — предупреждаем: логи по
+# умолчанию нацелены на /opt/netinv/logs, отличный от каталога проекта.
+if [[ "$SCRIPT_DIR" != "/opt/netinv" ]]; then
+  warn "Проект установлен в $SCRIPT_DIR, а не в /opt/netinv."
+  warn "    Логи по умолчанию нацелены на /opt/netinv/logs. Если хотите хранить"
+  warn "    логи рядом с проектом, задайте: export NETINV_LOG_DIR=$SCRIPT_DIR/logs"
+  warn "    Проверить фактический путь: ./netinv logpath"
 fi
 # Локальный фолбэк-каталог логов внутри проекта создаём всегда — на случай,
 # если /opt/netinv/logs недоступен во время запуска сканирования.
