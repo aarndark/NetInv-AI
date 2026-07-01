@@ -17,9 +17,14 @@
     <a class="brand" href="{{ url_for('index') }}" title="На стартовую страницу NetInv">
       🛰️ NetInv <span class="sub">Continuous Pentest Inventory</span>
     </a>
-    <nav>
-      <a href="{{ url_for('index') }}">Объекты</a>
-      <a href="{{ url_for('runs') }}">История запусков</a>
+    {# v1.6.0 (треб. 4): 3 вкладки с переключением вверху #}
+    <nav class="tabs">
+      <a href="{{ url_for('index') }}"
+         class="tab {% if active_tab == 'objects' %}active{% endif %}">Объекты сканирования</a>
+      <a href="{{ url_for('current') }}"
+         class="tab {% if active_tab == 'current' %}active{% endif %}">Текущее сканирование{% if running_count %} <span class="tab-badge">{{ running_count }}</span>{% endif %}</a>
+      <a href="{{ url_for('history') }}"
+         class="tab {% if active_tab == 'history' %}active{% endif %}">История сканирований</a>
       {% if current_user %}
         <span class="nav-user">👤 {{ current_user }}</span>
         <form method="post" action="{{ url_for('logout') }}" class="nav-logout">

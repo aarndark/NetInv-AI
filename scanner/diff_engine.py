@@ -238,6 +238,21 @@ def update_host_states(target_id, current_run_id, scan_class="main"):
         )
 
 
+def rebuild_host_states(target_id, scan_class):
+    """v1.6.0 (треб. 1): полный пересчёт host_state объекта после
+    удаления одного из запусков.
+
+    Очищает все строки host_state данного (target_id, scan_class) и заново
+    проигрывает все ОСТАВШИЕСЯ запуски класса в хронологическом
+    порядке через update_host_states(). Так как prior_run_ids() читает
+    текущее содержимое scan_runs, цепочки prev/prev2 и diff-ы
+    восстанавливаются корректно без учёта удалённого запуска.
+    """
+    db.clear_host_state(target_id, scan_class)
+    for run_id in db.run_ids_asc(target_id, scan_class):
+        update_host_states(target_id, run_id, scan_class=scan_class)
+
+
 def diff_to_text(diff_json):
     """Человекочитаемое представление diff для таблицы (требования 5–8)."""
     if not diff_json:

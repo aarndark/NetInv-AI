@@ -16,11 +16,18 @@ db.py — слой работы с SQLite для системы инвентар
 Вся БД — один файл, ничего внешнего разворачивать не нужно (по выбору пользователя).
 """
 
+import datetime as _dt
 import ipaddress
 import os
 import sqlite3
 import threading
 from contextlib import contextmanager
+
+
+def _now():
+    """Текущее время в ISO-формате (секундная точность) — единый источник
+    временных меток для provenance и журналов ошибок v1.6.0."""
+    return _dt.datetime.now().isoformat(timespec="seconds")
 
 
 def ip_sort_key(ip):
@@ -110,7 +117,44 @@ CREATE TABLE IF NOT EXISTS scan_runs (
     scan_class   TEXT NOT NULL DEFAULT 'main',
     -- options_json: краткие опции расширенного запуска (для истории) — JSON со
     -- значениями: syn_mode, profile, ports, extra_nse, do_web, advanced_anp.
-    options_json TEXT
+    options_json TEXT,
+    -- v1.6.0 (треб. 2): полный набор опций запуска (и main, и advanced) —
+    -- для колонки «Опции» → раскрывающийся список «опции» на странице истории.
+    options_full_json TEXT,
+    -- v1.6.0 (треб. 2): модули, УСПЕШНО применённые с учётом graceful
+    -- degradation (JSON-список {module,status,reason}). Дублирует таблицу
+    -- scan_modules для быстрого рендера раскрывающегося списка «модули».
+    modules_json TEXT,
+    -- v1.6.0 (треб. 4): абсолютный путь к файлу лога этого запуска
+    -- (для «ссылки на лог» в статистике истории).
+    log_path TEXT
+);
+
+-- v1.6.0 (треб. 3): ошибки сканирования по модулям. Фиксируются ОЧЕВИДНЫЕ
+-- ошибки инструментов (недоступность онлайн-CVE БД, HTTP 400 OSV, сбои
+-- парсинга и т.п.). Недоступность хостов и обычные результаты скана СЮДА
+-- НЕ вносятся. Каждая строка привязана к запуску и модулю (nmap/dalfox/
+-- nikto/osv/cve/webscan/...).
+CREATE TABLE IF NOT EXISTS scan_errors (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id      INTEGER NOT NULL REFERENCES scan_runs(id) ON DELETE CASCADE,
+    module      TEXT NOT NULL,               -- nmap|dalfox|nikto|osv|cve|webscan|dns|...
+    kind        TEXT NOT NULL DEFAULT 'error', -- error|degraded (инфо о graceful degradation)
+    message     TEXT NOT NULL,               -- краткое сообщение об ошибке
+    detail      TEXT,                        -- подробности (URL/продукт/исключение)
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- v1.6.0 (треб. 2): модули, задействованные в запуске, и их статус с учётом
+-- graceful degradation. status: used|skipped_missing|skipped_degraded|off.
+CREATE TABLE IF NOT EXISTS scan_modules (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id      INTEGER NOT NULL REFERENCES scan_runs(id) ON DELETE CASCADE,
+    module      TEXT NOT NULL,               -- nmap|nse|nse_vulners|whatweb|nikto|wpscan|dalfox|cve_online|cve_offline|dns_recon|dns_brute|dig_rdns|...
+    status      TEXT NOT NULL DEFAULT 'used', -- used|skipped_missing|skipped_degraded|off
+    reason      TEXT,                        -- пояснение (почему пропущен/деградировал)
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(run_id, module)
 );
 
 -- Узлы, обнаруженные в конкретном запуске
@@ -210,6 +254,20 @@ CREATE TABLE IF NOT EXISTS discovered_subdomains (
     tool        TEXT,                        -- dnsmap|dnsenum|dnsrecon|resolve
     last_run_id INTEGER,
     found_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    -- v1.6.0 (треб. 5): происхождение обнаружения поддомена во времени.
+    -- Утилит может быть несколько (напр. dnsmap и dnsrecon дали разные IP —
+    -- конфликт разрешается через resolve). Храним первое/последнее обнаружение
+    -- и инструменты, а также агрегированный список утилит.
+    first_seen  TEXT,                        -- дата первого обнаружения
+    first_tool  TEXT,                        -- утилита первого обнаружения
+    last_seen   TEXT,                        -- дата последнего обнаружения
+    last_tool   TEXT,                        -- утилита последнего обнаружения
+    tools       TEXT,                        -- все утилиты, обнаружившие (через запятую)
+    resolved_ip TEXT,                        -- IP после разрешения конфликта (resolve)
+    -- bound: поддомен привязан к объекту как подтверждённая цель (0/1).
+    bound       INTEGER NOT NULL DEFAULT 0,
+    -- present: обнаружен в ПОСЛЕДНЕМ скане (0/1) — для подсветки новых/исчезших.
+    present     INTEGER NOT NULL DEFAULT 1,
     UNIQUE(target_id, subdomain, ip)
 );
 
@@ -289,6 +347,8 @@ CREATE INDEX IF NOT EXISTS idx_iporigin_target ON ip_origin(target_id);
 CREATE INDEX IF NOT EXISTS idx_subdomains_target ON discovered_subdomains(target_id);
 CREATE INDEX IF NOT EXISTS idx_ipattrs_target ON ip_attributes(target_id);
 CREATE INDEX IF NOT EXISTS idx_vulns_host ON vulns(host_id);
+CREATE INDEX IF NOT EXISTS idx_scanerrors_run ON scan_errors(run_id);
+CREATE INDEX IF NOT EXISTS idx_scanmodules_run ON scan_modules(run_id);
 """
 
 
@@ -321,6 +381,25 @@ def _migrate(c):
     for col in ("severity_reason", "cve_id", "cvss", "cve_source"):
         if col not in vcols:
             c.execute(f"ALTER TABLE vulns ADD COLUMN {col} TEXT")
+
+    # v1.6.0 (треб. 2, 4): полный набор опций, список модулей и
+    # путь к логу в scan_runs.
+    for col in ("options_full_json", "modules_json", "log_path"):
+        if col not in rcols:
+            c.execute(f"ALTER TABLE scan_runs ADD COLUMN {col} TEXT")
+
+    # v1.6.0 (треб. 5): provenance-поля поддоменов (первое/последнее
+    # обнаружение, инструменты, привязка, присутствие, разрешённый IP).
+    scols = {r["name"] for r in c.execute(
+        "PRAGMA table_info(discovered_subdomains)")}
+    if scols:  # таблица уже существует — добавляем недостающие столбцы
+        for col, ddl in (("first_seen", "TEXT"), ("first_tool", "TEXT"),
+                         ("last_seen", "TEXT"), ("last_tool", "TEXT"),
+                         ("tools", "TEXT"), ("resolved_ip", "TEXT"),
+                         ("bound", "INTEGER NOT NULL DEFAULT 0"),
+                         ("present", "INTEGER NOT NULL DEFAULT 1")):
+            if col not in scols:
+                c.execute(f"ALTER TABLE discovered_subdomains ADD COLUMN {col} {ddl}")
 
     # host_state: класс сканирования и признак присутствия.
     # ВНИМАНИЕ: в старой схеме был UNIQUE(target_id, ip); добавление
@@ -513,19 +592,41 @@ def get_ip_origins(target_id):
 # ----------------------- discovered_subdomains -----------------------
 
 def add_subdomain(target_id, parent, subdomain, ip=None, tool=None, last_run_id=None):
-    """Добавить/обновить найденный поддомен (без дубликатов по имени+IP)."""
+    """Добавить/обновить найденный поддомен (без дубликатов по имени+IP).
+
+    v1.6.0 (треб. 5): ведём provenance — первое/последнее обнаружение,
+    инструменты (может быть несколько), агрегированный список утилит.
+    Новый поддомен помечается present=1; привязка (bound) не меняется.
+    """
     subdomain = (subdomain or "").strip().lower().rstrip(".")
     parent = (parent or "").strip().lower().rstrip(".")
     if not subdomain:
         return
+    now = _now()
     with _LOCK, connect() as c:
-        c.execute(
-            "INSERT INTO discovered_subdomains(target_id, parent, subdomain, ip, "
-            "tool, last_run_id) VALUES (?,?,?,?,?,?) "
-            "ON CONFLICT(target_id, subdomain, ip) DO UPDATE SET "
-            "tool=excluded.tool, last_run_id=excluded.last_run_id, "
-            "found_at=datetime('now')",
-            (target_id, parent, subdomain, ip, tool, last_run_id))
+        existing = c.execute(
+            "SELECT id, tools FROM discovered_subdomains "
+            "WHERE target_id=? AND subdomain=? AND ip IS ?",
+            (target_id, subdomain, ip)).fetchone()
+        if existing:
+            # Агрегируем список утилит (без дубликатов).
+            tools = [t for t in (existing["tools"] or "").split(",") if t]
+            if tool and tool not in tools:
+                tools.append(tool)
+            c.execute(
+                "UPDATE discovered_subdomains SET tool=?, last_run_id=?, "
+                "found_at=?, last_seen=?, last_tool=?, tools=?, present=1 "
+                "WHERE id=?",
+                (tool, last_run_id, now, now, tool, ",".join(tools),
+                 existing["id"]))
+        else:
+            c.execute(
+                "INSERT INTO discovered_subdomains(target_id, parent, subdomain, "
+                "ip, tool, last_run_id, found_at, first_seen, first_tool, "
+                "last_seen, last_tool, tools, present) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,1)",
+                (target_id, parent, subdomain, ip, tool, last_run_id, now,
+                 now, tool, now, tool, tool or ""))
         c.commit()
 
 
@@ -541,15 +642,126 @@ def list_subdomains(target_id):
     return rows
 
 
+def subdomain_conflicts(target_id):
+    """v1.6.0 (треб. 5): множество FQDN, для которых записано
+    несколько РАЗНЫХ IP (конфликт dnsmap vs dnsrecon — требует resolve)."""
+    with connect() as c:
+        rows = c.execute(
+            "SELECT subdomain, COUNT(DISTINCT ip) AS n FROM discovered_subdomains "
+            "WHERE target_id=? AND ip IS NOT NULL GROUP BY subdomain "
+            "HAVING n > 1", (target_id,)).fetchall()
+    return {r["subdomain"] for r in rows}
+
+
+def set_subdomain_bound(target_id, subdomain, bound):
+    """Привязать/отвязать поддомен к объекту (треб. 5, по одному)."""
+    subdomain = (subdomain or "").strip().lower().rstrip(".")
+    with _LOCK, connect() as c:
+        c.execute(
+            "UPDATE discovered_subdomains SET bound=? WHERE target_id=? AND subdomain=?",
+            (1 if bound else 0, target_id, subdomain))
+        c.commit()
+
+
+def set_all_subdomains_bound(target_id, bound, only_present=True):
+    """Массовая привязка/отвязка (треб. 5, «все одной кнопкой»).
+
+    bound=True — привязать НОВЫЕ обнаруженные (present=1) поддомены с IP;
+    bound=False — отвязать ИСЧЕЗНУВШИЕ (present=0). Возвращает число изменённых.
+    """
+    with _LOCK, connect() as c:
+        if bound:
+            cur = c.execute(
+                "UPDATE discovered_subdomains SET bound=1 "
+                "WHERE target_id=? AND bound=0 AND ip IS NOT NULL"
+                + (" AND present=1" if only_present else ""),
+                (target_id,))
+        else:
+            cur = c.execute(
+                "UPDATE discovered_subdomains SET bound=0 "
+                "WHERE target_id=? AND bound=1"
+                + (" AND present=0" if only_present else ""),
+                (target_id,))
+        c.commit()
+        return cur.rowcount
+
+
+def resolve_subdomain_ip(target_id, subdomain, resolved_ip, tool="resolve"):
+    """v1.6.0 (треб. 5): разрешить конфликт разных IP.
+
+    Схлопывает все записи данного FQDN в одну с подтверждённым IP
+    (resolved_ip), сохраняя агрегированный список утилит и provenance.
+    """
+    subdomain = (subdomain or "").strip().lower().rstrip(".")
+    with _LOCK, connect() as c:
+        rows = [dict(r) for r in c.execute(
+            "SELECT * FROM discovered_subdomains WHERE target_id=? AND subdomain=?",
+            (target_id, subdomain))]
+        if not rows:
+            return
+        tools = []
+        for r in rows:
+            for t in (r.get("tools") or r.get("tool") or "").split(","):
+                if t and t not in tools:
+                    tools.append(t)
+        if tool and tool not in tools:
+            tools.append(tool)
+        first_seen = min((r.get("first_seen") or r.get("found_at") or "")
+                         for r in rows)
+        keep = rows[0]
+        # Удаляем все дубликаты, оставляем одну запись.
+        c.execute("DELETE FROM discovered_subdomains WHERE target_id=? AND subdomain=?",
+                  (target_id, subdomain))
+        now = _now()
+        c.execute(
+            "INSERT INTO discovered_subdomains(target_id, parent, subdomain, ip, "
+            "tool, last_run_id, found_at, first_seen, first_tool, last_seen, "
+            "last_tool, tools, resolved_ip, bound, present) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (target_id, keep.get("parent"), subdomain, resolved_ip, tool,
+             keep.get("last_run_id"), now, first_seen or now,
+             keep.get("first_tool"), now, tool, ",".join(tools), resolved_ip,
+             int(keep.get("bound") or 0), 1))
+        c.commit()
+
+
+def mark_subdomains_run(target_id, run_id, since=None):
+    """v1.6.0 (треб. 5): после DNS-разведки пометить present=1 те
+    поддомены, что встретились в текущем запуске, а остальные — present=0
+    («исчезли»). Вызывается в конце разведки объекта.
+
+    Поскольку разведка идёт ДО создания записи запуска, add_subdomain
+    не знает run_id. Поэтому «обнаруженными сейчас» считаем те, чьё
+    last_seen >= since (время старта скана). Всем таким поддоменам
+    проставляем last_run_id. Если since не задан — фоллбек на last_run_id.
+    """
+    with _LOCK, connect() as c:
+        c.execute(
+            "UPDATE discovered_subdomains SET present=0 WHERE target_id=?",
+            (target_id,))
+        if since:
+            c.execute(
+                "UPDATE discovered_subdomains SET present=1, last_run_id=? "
+                "WHERE target_id=? AND last_seen>=?",
+                (run_id, target_id, since))
+        else:
+            c.execute(
+                "UPDATE discovered_subdomains SET present=1 "
+                "WHERE target_id=? AND last_run_id=?", (target_id, run_id))
+        c.commit()
+
+
 # ----------------------- scan_runs -----------------------
 
 def create_run(target_id, started_at, profile, nmap_args, scan_class="main",
-               options_json=None):
+               options_json=None, options_full_json=None, modules_json=None):
     with _LOCK, connect() as c:
         cur = c.execute(
             "INSERT INTO scan_runs(target_id, started_at, profile, nmap_args, "
-            "scan_class, options_json) VALUES (?,?,?,?,?,?)",
-            (target_id, started_at, profile, nmap_args, scan_class, options_json),
+            "scan_class, options_json, options_full_json, modules_json) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (target_id, started_at, profile, nmap_args, scan_class,
+             options_json, options_full_json, modules_json),
         )
         c.commit()
         return cur.lastrowid
@@ -609,6 +821,159 @@ def prior_run_ids(target_id, before_run_id, n=2, scan_class=None):
                 (target_id, before_run_id, n),
             ).fetchall()
         return [r["id"] for r in rows]
+
+
+def set_run_options_full(run_id, options_full_json):
+    """v1.6.0 (треб. 2): сохранить полный набор опций запуска."""
+    with _LOCK, connect() as c:
+        c.execute("UPDATE scan_runs SET options_full_json=? WHERE id=?",
+                  (options_full_json, run_id))
+        c.commit()
+
+
+def set_run_log_path(run_id, log_path):
+    """v1.6.0 (треб. 4): сохранить абсолютный путь к логу запуска."""
+    if run_id is None:
+        return
+    with _LOCK, connect() as c:
+        c.execute("UPDATE scan_runs SET log_path=? WHERE id=?",
+                  (log_path, run_id))
+        c.commit()
+
+
+def set_run_modules_json(run_id, modules_json):
+    """v1.6.0 (треб. 2): сохранить JSON-список модулей запуска
+    (дублирует scan_modules для быстрого рендера раскрывающегося списка)."""
+    with _LOCK, connect() as c:
+        c.execute("UPDATE scan_runs SET modules_json=? WHERE id=?",
+                  (modules_json, run_id))
+        c.commit()
+
+
+def delete_run(run_id):
+    """v1.6.0 (треб. 1): удалить нерепрезентативный запуск из БД.
+
+    Связанные hosts/ports/webres/vulns/scan_errors/scan_modules удаляются
+    каскадом (ON DELETE CASCADE). После удаления host_state может
+    ссылаться на несуществующие last/prev/prev2 run_id — чистим
+    ссылки и last_run_id у поддоменов. Возвращает (target_id, scan_class)
+    удалённого запуска, чтобы вызывающая сторона могла пересчитать
+    состояния узлов.
+    """
+    with _LOCK, connect() as c:
+        row = c.execute("SELECT target_id, scan_class FROM scan_runs WHERE id=?",
+                        (run_id,)).fetchone()
+        if not row:
+            return None
+        target_id, scan_class = row["target_id"], row["scan_class"]
+        # Снять ссылки из host_state (чтобы не указывали на удалённый запуск).
+        c.execute("UPDATE host_state SET last_run_id=NULL WHERE last_run_id=?", (run_id,))
+        c.execute("UPDATE host_state SET prev_run_id=NULL WHERE prev_run_id=?", (run_id,))
+        c.execute("UPDATE host_state SET prev2_run_id=NULL WHERE prev2_run_id=?", (run_id,))
+        c.execute("UPDATE discovered_subdomains SET last_run_id=NULL WHERE last_run_id=?",
+                  (run_id,))
+        # Сам запуск (каскад удалит hosts/ports/webres/vulns/scan_errors/scan_modules).
+        c.execute("DELETE FROM scan_runs WHERE id=?", (run_id,))
+        c.commit()
+        return (target_id, scan_class)
+
+
+def reset_database():
+    """v1.6.0 (треб. 6а, netinv -dbreset): обнулить всю историю
+    сканирований.
+
+    УДАЛЯЕМ: scan_runs (каскадом hosts/ports/webres/vulns/scan_errors/
+    scan_modules), host_state, ip_origin, discovered_subdomains.
+    СОХРАНЯЕМ: users, targets, target_domains, ip_notes, ip_attributes,
+    и файлы ./logs (они не в БД). Возвращает число удалённых запусков.
+    """
+    with _LOCK, connect() as c:
+        n = c.execute("SELECT COUNT(*) AS n FROM scan_runs").fetchone()["n"]
+        # Каскад от scan_runs снимет hosts/ports/webres/vulns/scan_errors/scan_modules.
+        c.execute("DELETE FROM scan_runs")
+        c.execute("DELETE FROM host_state")
+        c.execute("DELETE FROM ip_origin")
+        c.execute("DELETE FROM discovered_subdomains")
+        c.commit()
+        return n
+
+
+# ----------------------- scan_errors (v1.6.0, треб. 3) -----------------------
+
+def add_scan_error(run_id, module, message, detail=None, kind="error"):
+    """Зафиксировать очевидную ошибку инструмента/модуля (треб. 3).
+
+    kind='error'    — настоящая ошибка (недоступность онлайн-CVE БД,
+                      HTTP 400 OSV, сбой парсинга и т.п.).
+    kind='degraded' — инфо о graceful degradation (модуль не применялся).
+    run_id может быть None на ранней стадии (до create_run) — тогда не пишем.
+    """
+    if run_id is None:
+        return
+    with _LOCK, connect() as c:
+        c.execute(
+            "INSERT INTO scan_errors(run_id, module, kind, message, detail, created_at) "
+            "VALUES (?,?,?,?,?,?)",
+            (run_id, module, kind, message, detail, _now()))
+        c.commit()
+
+
+def errors_for_run(run_id):
+    """Ошибки запуска, сгруппированные по модулю (для раскрывающихся
+    списков в колонке «Ошибки сканирования»)."""
+    with connect() as c:
+        rows = [dict(r) for r in c.execute(
+            "SELECT * FROM scan_errors WHERE run_id=? ORDER BY module, id",
+            (run_id,))]
+    grouped = {}
+    for r in rows:
+        grouped.setdefault(r["module"], []).append(r)
+    return grouped
+
+
+# ----------------------- scan_modules (v1.6.0, треб. 2) -----------------------
+
+def set_scan_module(run_id, module, status="used", reason=None):
+    """Зафиксировать статус модуля в запуске (треб. 2).
+
+    status: used|skipped_missing|skipped_degraded|off. Повторный вызов для
+    того же (run_id, module) обновляет запись (UPSERT). run_id может
+    быть None на ранней стадии — тогда не пишем.
+    """
+    if run_id is None:
+        return
+    with _LOCK, connect() as c:
+        c.execute(
+            "INSERT INTO scan_modules(run_id, module, status, reason, created_at) "
+            "VALUES (?,?,?,?,?) "
+            "ON CONFLICT(run_id, module) DO UPDATE SET status=excluded.status, "
+            "reason=excluded.reason",
+            (run_id, module, status, reason, _now()))
+        c.commit()
+
+
+def modules_for_run(run_id):
+    """Список модулей запуска с их статусами (треб. 2)."""
+    with connect() as c:
+        return [dict(r) for r in c.execute(
+            "SELECT * FROM scan_modules WHERE run_id=? ORDER BY module",
+            (run_id,))]
+
+
+def get_run_full(run_id):
+    """v1.6.0: запуск со всеми полями + имя/CIDR объекта, модули и
+    сгруппированные ошибки — для рендера истории/текущего скана."""
+    with connect() as c:
+        r = c.execute(
+            "SELECT r.*, t.name AS target_name, t.cidr AS target_cidr "
+            "FROM scan_runs r JOIN targets t ON t.id=r.target_id WHERE r.id=?",
+            (run_id,)).fetchone()
+        if not r:
+            return None
+        run = dict(r)
+    run["modules"] = modules_for_run(run_id)
+    run["errors"] = errors_for_run(run_id)
+    return run
 
 
 # ----------------------- hosts/ports/webres -----------------------
@@ -715,6 +1080,25 @@ def host_state_ips(target_id, scan_class):
         return {r["ip"] for r in c.execute(
             "SELECT ip FROM host_state WHERE target_id=? AND scan_class=?",
             (target_id, scan_class))}
+
+
+def clear_host_state(target_id, scan_class):
+    """v1.6.0 (треб. 1): удалить все строки host_state объекта в рамках
+    класса. Нужно для полного пересчёта состояний после удаления запуска."""
+    with _LOCK, connect() as c:
+        c.execute("DELETE FROM host_state WHERE target_id=? AND scan_class=?",
+                  (target_id, scan_class))
+        c.commit()
+
+
+def run_ids_asc(target_id, scan_class):
+    """v1.6.0 (треб. 1): id завершённых запусков объекта данного класса
+    в ХРОНОЛОГИЧЕСКОМ порядке (для повторного проигрывания при пересчёте
+    host_state после удаления одного из запусков)."""
+    with connect() as c:
+        return [r["id"] for r in c.execute(
+            "SELECT id FROM scan_runs WHERE target_id=? AND scan_class=? "
+            "ORDER BY id ASC", (target_id, scan_class))]
 
 
 def report_rows(target_id, scan_class="main"):

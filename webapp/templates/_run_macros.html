@@ -1,0 +1,175 @@
+{# Макросы истории запусков NetInv v1.6.0 (треб. 1,2,3,4).
+   Вынесены в отдельный файл, чтобы переиспользовать таблицу истории
+   как во вкладке «История сканирований» (history.html), так и на странице
+   отчёта (report.html). Требует зарегистрированных фильтров:
+   fmtdate, optsfull, modlabel, modstatus. #}
+
+{# ---- Раскрывающийся список «Опции» (треб. 2): 3 подсписка ---- #}
+{% macro options_cell(run) %}
+  <div class="opt-cell">
+    {# 1) Команда nmap #}
+    <details class="opt-drop">
+      <summary>команда nmap</summary>
+      <div class="opt-body">
+        <code class="cmd">{{ run.nmap_args or '—' }}</code>
+      </div>
+    </details>
+    {# 2) Применённые модули (graceful degradation): статус каждого модуля #}
+    <details class="opt-drop">
+      <summary>модули{% if run.modules %} ({{ run.modules|selectattr('status','equalto','used')|list|length }}/{{ run.modules|length }}){% endif %}</summary>
+      <div class="opt-body">
+        {% if run.modules %}
+          <ul class="opt-list">
+          {% for m in run.modules %}
+            <li>
+              <span class="mod-name">{{ m.module|modlabel }}</span>
+              <span class="mod-status st-{{ m.status }}">{{ m.status|modstatus }}</span>
+              {% if m.reason %}<span class="muted small">— {{ m.reason }}</span>{% endif %}
+            </li>
+          {% endfor %}
+          </ul>
+        {% else %}
+          <span class="muted small">нет данных о модулях (запуск до v1.6.0)</span>
+        {% endif %}
+      </div>
+    </details>
+    {# 3) Все опции расширенного скана #}
+    <details class="opt-drop">
+      <summary>опции</summary>
+      <div class="opt-body">
+        {% set opts = run.options_full_json|optsfull %}
+        {% if opts %}
+          <ul class="opt-list">
+          {% for label, val in opts %}
+            <li><span class="opt-label">{{ label }}:</span> <span class="opt-val">{{ val }}</span></li>
+          {% endfor %}
+          </ul>
+        {% elif run.scan_class == 'main' %}
+          <span class="muted small">пресет «основное» (параметры фиксированы)</span>
+        {% else %}
+          <span class="muted small">нет данных об опциях (запуск до v1.6.0)</span>
+        {% endif %}
+      </div>
+    </details>
+  </div>
+{% endmacro %}
+
+{# ---- Раскрывающийся список «Ошибки сканирования» (треб. 3) ---- #}
+{# Недоступность хостов сюда НЕ вносится (по требованию). #}
+{% macro errors_cell(run) %}
+  <div class="err-cell">
+    {% set errmap = run.errors or {} %}
+    {% set total = namespace(n=0) %}
+    {% for mod, items in errmap.items() %}{% set total.n = total.n + items|length %}{% endfor %}
+    {% if total.n == 0 %}
+      <span class="err-ok" title="Очевидных ошибок инструментов не зафиксировано">✓ без ошибок</span>
+    {% else %}
+      <span class="err-count" title="Всего записей об ошибках/деградации">⚠ {{ total.n }}</span>
+    {% endif %}
+    {# Пояснение о graceful degradation — в начале, всегда. #}
+    <details class="err-drop err-intro">
+      <summary>о деградации</summary>
+      <div class="err-body">
+        <p class="muted small">
+          Все модули безопасности <strong>опциональны</strong> и работают в режиме
+          graceful degradation: если инструмент не установлен или недоступен —
+          скан продолжается, а модуль пропускается с предупреждением.
+          Недоступность самих хостов сети <strong>ошибкой не считается</strong>
+          и здесь не отображается.
+        </p>
+      </div>
+    </details>
+    {% for mod, items in errmap.items() %}
+      <details class="err-drop">
+        <summary>
+          {{ mod|modlabel }}
+          <span class="err-badge {{ 'kind-degraded' if items[0].kind == 'degraded' else 'kind-error' }}">{{ items|length }}</span>
+        </summary>
+        <div class="err-body">
+          <ul class="err-list">
+          {% for e in items %}
+            <li class="err-item {{ 'is-degraded' if e.kind == 'degraded' else 'is-error' }}">
+              <div class="err-msg">{{ e.message }}</div>
+              {% if e.detail %}<div class="err-detail muted small">{{ e.detail }}</div>{% endif %}
+              <div class="err-time muted small">{{ e.created_at|fmtdate }}</div>
+            </li>
+          {% endfor %}
+          </ul>
+        </div>
+      </details>
+    {% endfor %}
+  </div>
+{% endmacro %}
+
+{# ---- Чипы статистики запуска (треб. 4) ---- #}
+{# subdomains кликабелен → окно поддоменов объекта; log — ссылка на лог. #}
+{% macro run_stats(run) %}
+  {% set s = run.stats %}
+  {% if s %}
+  <div class="run-stats">
+    <span class="sum-chip">узлов: <strong>{{ s.total }}</strong></span>
+    <span class="sum-chip sum-live">живые: <strong>{{ s.live }}</strong></span>
+    <span class="sum-chip sum-palo">Palo Alto: <strong>{{ s.palo }}</strong></span>
+    <span class="sum-chip">откр. портов: <strong>{{ s.open_ports }}</strong></span>
+    <a class="sum-chip sum-link" href="{{ url_for('subdomains_window', target_id=run.target_id) }}"
+       title="Открыть окно поддоменов объекта">поддомены: <strong>{{ s.subdomains }}</strong></a>
+    <a class="sum-chip sum-link" href="{{ url_for('view_log', run_id=run.id) }}" target="_blank" rel="noopener"
+       title="Открыть файл лога запуска">лог</a>
+  </div>
+  {% endif %}
+{% endmacro %}
+
+{# ---- Таблица истории запусков (треб. 1,2,3,4) ---- #}
+{# select_compare — показывать ли галочки выбора для сравнения (≤5). #}
+{% macro history_table(runs, tkey='history', select_compare=true) %}
+  <div class="table-scroll">
+  <table class="tbl runs-tbl history-tbl" data-table-key="{{ tkey }}">
+    <thead>
+      <tr>
+        {% if select_compare %}<th title="Выберите до 5 запусков для сравнения">Сравн.</th>{% endif %}
+        <th>#</th>
+        <th>Начало</th>
+        <th>Окончание</th>
+        <th>Класс</th>
+        <th>Статус</th>
+        <th>Статистика</th>
+        <th>Опции</th>
+        <th>Ошибки сканирования</th>
+        <th>Удалить</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for r in runs %}
+      <tr>
+        {% if select_compare %}
+        <td class="cmp-cell">
+          <input type="checkbox" class="cmp-input" value="{{ r.id }}"
+                 data-target="{{ r.target_id }}"
+                 title="Отметить запуск для сравнения (эталон — первый выбранный)">
+        </td>
+        {% endif %}
+        <td>{{ r.id }}</td>
+        <td class="nowrap">{{ r.started_at|fmtdate }}</td>
+        <td class="nowrap">{{ r.finished_at|fmtdate }}</td>
+        <td>
+          {% if r.scan_class == 'main' %}<span class="badge cls-main">основное</span>
+          {% else %}<span class="badge cls-adv">расширенное</span>{% endif %}
+        </td>
+        <td><span class="badge {{ r.status }}">{{ r.status }}</span></td>
+        <td>{{ run_stats(r) }}</td>
+        <td>{{ options_cell(r) }}</td>
+        <td>{{ errors_cell(r) }}</td>
+        {# Треб. 1: колонка «Удалить» (корзина) вместо «Команда nmap». #}
+        <td class="del-cell">
+          <form method="post" action="{{ url_for('delete_run', run_id=r.id) }}"
+                class="inline-del"
+                onsubmit="return confirm('Вы хотите удалить из базы данных результаты {{ 'основного' if r.scan_class == 'main' else 'расширенного' }} сканирования от {{ r.started_at|fmtdate }}?');">
+            <button type="submit" class="btn-trash" title="Удалить запуск из базы данных">🗑</button>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+{% endmacro %}

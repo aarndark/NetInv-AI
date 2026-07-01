@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% set active_tab = 'objects' %}
 {% block title %}Отчёт — {{ target.name }}{% endblock %}
 {# Треб. 1в: страница отчёта почти на всю ширину браузера. #}
 {% block body_class %}report-page{% endblock %}
@@ -7,6 +8,7 @@
 {# Требование 2/3/4/5: макрос таблицы отчёта вынесен в отдельный файл,
    чтобы его можно было переиспользовать во фрагменте истории запусков. #}
 {% from "_report_macros.html" import report_table %}
+{% from "_run_macros.html" import history_table %}
 
 <section class="card">
   <div class="report-head">
@@ -102,10 +104,14 @@
 
   {# Найденные поддомены (разведка dnsmap/dnsenum/dnsrecon + резолв) #}
   {% if subdomains %}
-  <h3 class="section-title">🔎 Поддомены ({{ subdomains|length }})</h3>
+  <h3 class="section-title">🔎 Поддомены ({{ subdomains|length }})
+    <a class="btn small" href="{{ url_for('subdomains_window', target_id=target.id) }}"
+       title="Открыть окно управления поддоменами (привязка/отвязка, resolve)">⇉ Окно поддоменов</a>
+  </h3>
   <p class="muted small">
     Результаты DNS-разведки привязанных доменов 2-го уровня и резолва доменов 3+ уровня.
     Найденные IP добавлены к сканированию и отражены в таблице выше (столбец «Источник»).
+    Для привязки/отвязки и разрешения конфликтов IP — откройте окно поддоменов.
   </p>
   <div class="table-scroll">
   <table class="tbl">
@@ -139,36 +145,20 @@
 </section>
 
 <section class="card">
-  <h3>История запусков по объекту
-    ({% if scan_class == 'main' %}основное{% else %}расширенное{% endif %})</h3>
+  <div class="report-head">
+    <div>
+      <h3>История запусков по объекту
+        ({% if scan_class == 'main' %}основное{% else %}расширенное{% endif %})</h3>
+    </div>
+    <div class="report-actions">
+      <a class="btn" href="{{ url_for('history', target_id=target.id, scan_class=scan_class) }}">
+        Полная история и сравнение →</a>
+    </div>
+  </div>
   {% if runs %}
-  <p class="muted small">Требование 3: кликните на строку запуска, чтобы подгрузить таблицу его результатов ниже.</p>
-  <table class="tbl runs-tbl">
-    <thead><tr><th>#</th><th>Начало</th><th>Окончание</th><th>Класс</th><th>Статус</th><th>Узлов up</th><th>Краткие опции</th><th>Команда nmap</th></tr></thead>
-    <tbody>
-    {% for r in runs %}
-      <tr class="run-row" data-run-id="{{ r.id }}" title="Показать результаты этого запуска">
-        <td>{{ r.id }}</td>
-        <td>{{ r.started_at|fmtdate }}</td>
-        <td>{{ r.finished_at|fmtdate }}</td>
-        <td>
-          {% if r.scan_class == 'main' %}<span class="badge cls-main">основное</span>
-          {% else %}<span class="badge cls-adv">расширенное</span>{% endif %}
-        </td>
-        <td><span class="badge {{ r.status }}">{{ r.status }}</span></td>
-        <td>{{ r.hosts_up }}</td>
-        {# Требование 12: для расширенного — краткие опции #}
-        <td class="small">
-          {% if r.scan_class == 'advanced' and r.options_json %}{{ r.options_json|optsbrief }}
-          {% else %}<span class="muted">пресет «основное»</span>{% endif %}
-        </td>
-        <td><code class="cmd">{{ r.nmap_args }}</code></td>
-      </tr>
-    {% endfor %}
-    </tbody>
-  </table>
-  {# Требование 3: сюда AJAX подгружает таблицу результатов выбранного запуска #}
-  <div id="run-rows-panel"></div>
+  {# v1.6.0 (треб. 1,2,3): колонки Удалить / Опции (3 списка) /
+     Ошибки сканирования. Сравнение выбором — на вкладке «История». #}
+  {{ history_table(runs, tkey='report-history-' ~ scan_class, select_compare=false) }}
   {% else %}
     <p class="muted">Запусков ещё не было.</p>
   {% endif %}
@@ -252,37 +242,6 @@ document.querySelectorAll('.ctrl-input').forEach(function (chk) {
   });
 });
 
-// Требование 3: клик по строке «Истории запусков» — подгрузить таблицу результатов.
-(function () {
-  var panel = document.getElementById('run-rows-panel');
-  if (!panel) return;
-  document.querySelectorAll('.run-row').forEach(function (row) {
-    row.addEventListener('click', function () {
-      var runId = row.getAttribute('data-run-id');
-      // Подсветка активной строки.
-      document.querySelectorAll('.run-row.active').forEach(function (a) {
-        a.classList.remove('active');
-      });
-      row.classList.add('active');
-      panel.innerHTML = '<p class="muted">Загрузка результатов запуска #' + runId + '…</p>';
-      fetch('/run/' + runId + '/rows')
-        .then(function (resp) {
-          if (!resp.ok) { throw new Error('HTTP ' + resp.status); }
-          return resp.text();
-        })
-        .then(function (html) {
-          panel.innerHTML = html;
-          // Включаем перетягивание ширин колонок на подгруженной таблице (требование 2).
-          if (window.netinvInitResizable) { window.netinvInitResizable(panel); }
-          panel.scrollIntoView({behavior: 'smooth', block: 'nearest'});
-        })
-        .catch(function (err) {
-          panel.innerHTML = '<p class="muted err">Не удалось загрузить результаты запуска: ' +
-                            err.message + '</p>';
-        });
-    });
-  });
-})();
 </script>
 
 {% endblock %}

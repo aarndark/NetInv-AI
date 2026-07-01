@@ -1,0 +1,152 @@
+{% extends "base.html" %}
+{% block title %}История сканирований — NetInv{% endblock %}
+{% block body_class %}report-page{% endblock %}
+{% block content %}
+
+{% from "_run_macros.html" import history_table %}
+
+<section class="card">
+  <div class="report-head">
+    <div>
+      <h2>История сканирований</h2>
+      <p class="muted">Разбивка по объектам. Для каждого запуска — статистика,
+        опции (команда nmap / модули / опции) и ошибки сканирования.</p>
+    </div>
+  </div>
+
+  {# Фильтры (треб. 4): по объекту, классу, датам. #}
+  <form method="get" action="{{ url_for('history') }}" class="filters-form">
+    <label>Объект
+      <select name="target_id">
+        <option value="">— все объекты —</option>
+        {% for t in targets %}
+          <option value="{{ t.id }}" {% if f_target == t.id %}selected{% endif %}>{{ t.name }} ({{ t.cidr }})</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Класс
+      <select name="scan_class">
+        <option value="">— оба класса —</option>
+        <option value="main" {% if f_class == 'main' %}selected{% endif %}>основное</option>
+        <option value="advanced" {% if f_class == 'advanced' %}selected{% endif %}>расширенное</option>
+      </select>
+    </label>
+    <label>С даты
+      <input type="date" name="date_from" value="{{ f_from }}">
+    </label>
+    <label>По дату
+      <input type="date" name="date_to" value="{{ f_to }}">
+    </label>
+    <button type="submit" class="btn primary">Применить</button>
+    <a class="btn" href="{{ url_for('history') }}">Сбросить</a>
+  </form>
+
+  {# Панель сравнения (треб. 4): выбор до 5 запусков, эталон — первый. #}
+  <div class="compare-bar" id="compare-bar">
+    <span class="cmp-info">
+      Выбрано для сравнения: <strong id="cmp-count">0</strong> / 5.
+      Эталон — <strong>первый выбранный</strong> запуск.
+    </span>
+    <button type="button" class="btn primary" id="cmp-go" disabled>Сравнить</button>
+    <a class="btn" id="cmp-csv" href="#" style="display:none;">⬇ CSV сравнения</a>
+    <button type="button" class="btn" id="cmp-clear" style="display:none;">Очистить выбор</button>
+    <span class="cmp-warn" id="cmp-warn"></span>
+  </div>
+</section>
+
+{% if not groups %}
+  <section class="card"><p class="muted">Запусков по заданным фильтрам не найдено.</p></section>
+{% else %}
+  {% for g in groups %}
+  <section class="card">
+    <h3 class="section-title">
+      🎯 {{ g.target_name }} <code>{{ g.target_cidr }}</code>
+      <span class="muted small">— запусков: {{ g.runs|length }}</span>
+    </h3>
+    {{ history_table(g.runs, tkey='history-' ~ g.target_id, select_compare=true) }}
+  </section>
+  {% endfor %}
+{% endif %}
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Треб. 4: выбор до 5 запусков для сравнения. Эталон = первый выбранный.
+// Сравнивать можно только запуски одного объекта.
+(function () {
+  var selected = [];            // порядок выбора (важно: эталон — первый)
+  var lockTarget = null;        // объект, к которому привязан текущий выбор
+  var MAX = 5;
+  var countEl = document.getElementById('cmp-count');
+  var goBtn = document.getElementById('cmp-go');
+  var csvLink = document.getElementById('cmp-csv');
+  var clearBtn = document.getElementById('cmp-clear');
+  var warnEl = document.getElementById('cmp-warn');
+  var boxes = document.querySelectorAll('.cmp-input');
+
+  function refresh() {
+    countEl.textContent = selected.length;
+    var enabled = selected.length >= 2;
+    goBtn.disabled = !enabled;
+    var idsStr = selected.join(',');
+    if (enabled) {
+      csvLink.style.display = '';
+      csvLink.href = "{{ url_for('compare_csv') }}?ids=" + idsStr;
+    } else {
+      csvLink.style.display = 'none';
+    }
+    clearBtn.style.display = selected.length ? '' : 'none';
+    // Блокируем чекбоксы других объектов, пока есть выбор.
+    boxes.forEach(function (b) {
+      if (lockTarget !== null && b.getAttribute('data-target') !== lockTarget) {
+        b.disabled = true;
+      } else {
+        b.disabled = false;
+      }
+    });
+  }
+
+  boxes.forEach(function (b) {
+    b.addEventListener('change', function () {
+      var id = b.value;
+      var tgt = b.getAttribute('data-target');
+      warnEl.textContent = '';
+      if (b.checked) {
+        if (lockTarget === null) { lockTarget = tgt; }
+        if (tgt !== lockTarget) {
+          b.checked = false;
+          warnEl.textContent = 'Сравнивать можно только запуски одного объекта.';
+          return;
+        }
+        if (selected.length >= MAX) {
+          b.checked = false;
+          warnEl.textContent = 'Можно выбрать не более 5 запусков.';
+          return;
+        }
+        selected.push(id);
+      } else {
+        selected = selected.filter(function (x) { return x !== id; });
+        if (selected.length === 0) { lockTarget = null; }
+      }
+      refresh();
+    });
+  });
+
+  goBtn.addEventListener('click', function () {
+    if (selected.length >= 2) {
+      window.location.href = "{{ url_for('compare') }}?ids=" + selected.join(',');
+    }
+  });
+
+  clearBtn.addEventListener('click', function () {
+    selected = []; lockTarget = null;
+    boxes.forEach(function (b) { b.checked = false; });
+    warnEl.textContent = '';
+    refresh();
+  });
+
+  refresh();
+})();
+</script>
+{% endblock %}

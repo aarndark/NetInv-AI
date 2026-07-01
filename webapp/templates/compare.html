@@ -1,0 +1,105 @@
+{% extends "base.html" %}
+{% block title %}Сравнение запусков — NetInv{% endblock %}
+{% block body_class %}report-page{% endblock %}
+{% block content %}
+{% set base_run = runs[0] %}
+
+<section class="card">
+  <div class="report-head">
+    <div>
+      <h2>Сравнение сканирований ({{ runs|length }})</h2>
+      <p class="muted">
+        Эталон — <strong>первый выбранный</strong> запуск:
+        #{{ base_run.id }} от {{ base_run.started_at|fmtdate }}
+        (<code>{{ base_run.target_name }}</code>).
+        Остальные колонки показывают отличия от эталона по IP и открытым портам.
+      </p>
+    </div>
+    <div class="report-actions">
+      <a class="btn" href="{{ url_for('compare_csv') }}?ids={{ ids_str }}">⬇ CSV сравнения</a>
+      <a class="btn" href="{{ url_for('history') }}">← К истории</a>
+    </div>
+  </div>
+
+  {# Легенда выбранных запусков #}
+  <div class="cmp-legend">
+    {% for r in runs %}
+      <span class="cmp-run {% if loop.first %}is-base{% endif %}">
+        {% if loop.first %}★ эталон{% else %}#{{ loop.index }}{% endif %}:
+        запуск #{{ r.id }} — {{ r.started_at|fmtdate }}
+        ({% if r.scan_class == 'main' %}основное{% else %}расширенное{% endif %})
+      </span>
+    {% endfor %}
+  </div>
+
+  <div class="table-scroll">
+  <table class="tbl compare-tbl" data-table-key="compare-{{ ids_str }}">
+    <thead>
+      <tr>
+        <th>IP-адрес</th>
+        {% for r in runs %}
+          {% if loop.first %}
+            <th>Эталон<br><span class="hint">{{ r.started_at|fmtdate }}</span></th>
+          {% else %}
+            <th>Отличия от сканирования {{ base_run.started_at|fmtdate }}<br>
+              <span class="hint">запуск #{{ r.id }} — {{ r.started_at|fmtdate }}</span></th>
+          {% endif %}
+        {% endfor %}
+      </tr>
+    </thead>
+    <tbody>
+    {% for row in rows %}
+      <tr>
+        <td class="nowrap"><code>{{ row.ip }}</code></td>
+        {% for cell in row.cells %}
+          {% if loop.first %}
+            {# Эталонная колонка: просто наличие + порты. #}
+            <td>
+              {% if cell.present %}
+                {% if cell.ports %}
+                  {% for p in cell.ports %}<span class="port ok">{{ p }}</span> {% endfor %}
+                {% else %}<span class="muted small">без открытых портов</span>{% endif %}
+              {% else %}
+                <span class="ip-tag-gone">нет в эталоне</span>
+              {% endif %}
+            </td>
+          {% else %}
+            {# Колонка отличий. #}
+            <td>
+              {% set d = cell.diff %}
+              {% if d and d.presence %}
+                <div><span class="{{ 'ip-tag-new' if d.presence == 'новый IP' else 'ip-tag-gone' }}">{{ d.presence }}</span></div>
+              {% endif %}
+              {% if cell.present %}
+                {% if d and d.new_ports %}
+                  <div class="diff-line"><span class="diff-lbl new">+ новые порты:</span>
+                    {% for p in d.new_ports %}<span class="port port-new">{{ p }}</span> {% endfor %}
+                  </div>
+                {% endif %}
+                {% if d and d.gone_ports %}
+                  <div class="diff-line"><span class="diff-lbl gone">− пропали порты:</span>
+                    {% for p in d.gone_ports %}<span class="port gone">{{ p }}</span> {% endfor %}
+                  </div>
+                {% endif %}
+                {% if d and not d.presence and not d.new_ports and not d.gone_ports %}
+                  <span class="diff-same">без отличий</span>
+                {% endif %}
+              {% endif %}
+            </td>
+          {% endif %}
+        {% endfor %}
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+
+  <p class="legend">
+    <span class="port ok">порт</span> — открыт в эталоне.
+    <span class="port port-new">порт</span> — новый порт относительно эталона.
+    <span class="port gone">порт</span> — пропал относительно эталона.
+    <span class="ip-tag-new">IP</span> — новый IP; <span class="ip-tag-gone">IP</span> — IP отсутствует относительно эталона.
+  </p>
+</section>
+
+{% endblock %}

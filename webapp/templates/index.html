@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% set active_tab = 'objects' %}
 {% block content %}
 
 <section class="card">
@@ -130,37 +131,7 @@
   {% endif %}
 </section>
 
-<section class="card">
-  <h2>Последние запуски</h2>
-  {% if not runs %}
-    <p class="muted">Запусков ещё не было.</p>
-  {% else %}
-  <table class="tbl">
-    <thead>
-      <tr><th>#</th><th>Объект</th><th>CIDR</th><th>Начало</th><th>Класс</th><th>Статус</th><th>Узлов up</th><th>Опции</th></tr>
-    </thead>
-    <tbody>
-    {% for r in runs %}
-      <tr>
-        <td>{{ r.id }}</td>
-        <td><a href="{{ url_for('report', target_id=r.target_id, scan_class=r.scan_class) }}">{{ r.target_name }}</a></td>
-        <td><code>{{ r.target_cidr }}</code></td>
-        <td>{{ r.started_at|fmtdate }}</td>
-        <td>
-          {% if r.scan_class == 'main' %}<span class="badge cls-main">основное</span>
-          {% else %}<span class="badge cls-adv">расширенное</span>{% endif %}
-        </td>
-        <td><span class="badge {{ r.status }}">{{ r.status }}</span></td>
-        <td>{{ r.hosts_up }}</td>
-        <td class="muted small">
-          {% if r.scan_class == 'advanced' and r.options_json %}{{ r.options_json|optsbrief }}
-          {% else %}{{ r.profile }}{% endif %}
-        </td>
-      </tr>
-    {% endfor %}
-    </tbody>
-  </table>
-  {% endif %}
-</section>
+{# v1.6.0 (треб. 4): секция «Последние запуски» перенесена во вкладку
+   «История сканирований». На стартовой странице остаются только объекты. #}
 
 {% endblock %}

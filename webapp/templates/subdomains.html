@@ -1,0 +1,143 @@
+{% extends "base.html" %}
+{% block title %}Поддомены — {{ target.name }} — NetInv{% endblock %}
+{% block body_class %}report-page{% endblock %}
+{% block content %}
+
+<section class="card">
+  <div class="report-head">
+    <div>
+      <h2>Поддомены объекта: {{ target.name }}</h2>
+      <p class="muted"><code>{{ target.cidr }}</code> — {{ target.description or 'без описания' }}</p>
+    </div>
+    <div class="report-actions">
+      <a class="btn" href="{{ url_for('report', target_id=target.id) }}">← К отчёту</a>
+      <a class="btn" href="{{ url_for('history') }}">К истории</a>
+    </div>
+  </div>
+
+  {# Сводка по поддоменам (треб. 5). #}
+  <div class="report-summary">
+    <span class="sum-chip">Всего: <strong>{{ summary.total }}</strong></span>
+    <span class="sum-chip sum-live">актуальные: <strong>{{ summary.present }}</strong></span>
+    <span class="sum-chip sum-palo">исчезнувшие: <strong>{{ summary.gone }}</strong></span>
+    {% if summary.conflicts %}<span class="sum-chip sum-crit">конфликты IP: <strong>{{ summary.conflicts }}</strong></span>{% endif %}
+  </div>
+
+  <p class="muted small">
+    FQDN отсортированы «по уровням» (как в списке доменов). Новые обнаруженные
+    поддомены с IP можно <strong>привязать</strong> к объекту (все сразу или по
+    одному), исчезнувшие — <strong>отвязать</strong>. Конфликты IP (например,
+    dnsmap vs dnsrecon) требуют разрешения (resolve). Массовые операции
+    выполняются с подтверждением.
+  </p>
+
+  {# Массовые операции (треб. 5) с подтверждением. #}
+  <div class="bulk-bar">
+    <form method="post" action="{{ url_for('subdomains_bind', target_id=target.id) }}"
+          class="inline-scan"
+          onsubmit="return confirm('Привязать к объекту ВСЕ новые обнаруженные поддомены с IP?');">
+      <input type="hidden" name="action" value="bind_all_new">
+      <button type="submit" class="btn primary">Привязать все новые</button>
+    </form>
+    <form method="post" action="{{ url_for('subdomains_bind', target_id=target.id) }}"
+          class="inline-scan"
+          onsubmit="return confirm('Отвязать от объекта ВСЕ исчезнувшие поддомены?');">
+      <input type="hidden" name="action" value="unbind_all_gone">
+      <button type="submit" class="btn">Отвязать все исчезнувшие</button>
+    </form>
+  </div>
+
+  {% if not subs %}
+    <p class="muted">Поддомены ещё не обнаружены. Запустите сканирование с DNS-разведкой.</p>
+  {% else %}
+  <div class="table-scroll">
+  <table class="tbl subdomains-tbl" data-table-key="subdomains-{{ target.id }}">
+    <thead>
+      <tr>
+        <th>Родительский домен</th>
+        <th>FQDN / поддомен</th>
+        <th>IP-адрес</th>
+        <th>Первое обнаружение<br><span class="hint">дата · утилита</span></th>
+        <th>Последнее обнаружение<br><span class="hint">дата · утилита</span></th>
+        <th>Статус</th>
+        <th>Действия</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for s in subs %}
+      {# Подсветка строк: новые (present), исчезнувшие (not present), конфликт. #}
+      <tr class="{% if s.conflict %}row-conflict{% elif s.present %}row-new{% else %}row-gone{% endif %}">
+        <td><code>{{ s.parent }}</code></td>
+        <td><code>{{ s.subdomain }}</code></td>
+        <td>
+          {% if s.resolved_ip %}
+            <span class="ip-resolved" title="IP подтверждён через resolve">{{ s.resolved_ip }}</span>
+          {% elif s.ip %}
+            {{ s.ip }}
+          {% else %}<span class="muted">—</span>{% endif %}
+          {% if s.conflict %}<span class="conflict-tag" title="Разные IP от разных утилит">⚠ конфликт</span>{% endif %}
+        </td>
+        <td class="nowrap">
+          {{ s.first_seen|fmtdate if s.first_seen else (s.found_at|fmtdate) }}
+          {% if s.first_tool %}<span class="badge">{{ s.first_tool }}</span>{% elif s.tool %}<span class="badge">{{ s.tool }}</span>{% endif %}
+        </td>
+        <td class="nowrap">
+          {{ s.last_seen|fmtdate if s.last_seen else (s.found_at|fmtdate) }}
+          {% if s.last_tool %}<span class="badge">{{ s.last_tool }}</span>{% elif s.tool %}<span class="badge">{{ s.tool }}</span>{% endif %}
+        </td>
+        <td>
+          {% if s.conflict %}<span class="st-badge st-conflict">конфликт IP</span>
+          {% elif s.present %}<span class="st-badge st-present">актуальный</span>
+          {% else %}<span class="st-badge st-gone">исчезнувший</span>{% endif %}
+          {% if s.bound %}<span class="st-badge st-bound">привязан</span>{% endif %}
+        </td>
+        <td class="sub-actions">
+          {# Разрешение конфликта IP (resolve). #}
+          {% if s.conflict %}
+          <details class="opt-drop">
+            <summary>resolve</summary>
+            <div class="opt-body">
+              <form method="post" action="{{ url_for('subdomains_resolve', target_id=target.id) }}"
+                    class="inline-scan">
+                <input type="hidden" name="subdomain" value="{{ s.subdomain }}">
+                <input type="text" name="resolved_ip" size="15" placeholder="верный IP"
+                       value="{{ s.resolved_ip or s.ip or '' }}" required>
+                <button type="submit" class="btn primary">Разрешить</button>
+              </form>
+            </div>
+          </details>
+          {% endif %}
+          {# Привязать / отвязать по одному. #}
+          {% if s.bound %}
+          <form method="post" action="{{ url_for('subdomains_bind', target_id=target.id) }}"
+                class="inline-del"
+                onsubmit="return confirm('Отвязать поддомен {{ s.subdomain }} от объекта?');">
+            <input type="hidden" name="action" value="unbind_one">
+            <input type="hidden" name="subdomain" value="{{ s.subdomain }}">
+            <button type="submit" class="btn">Отвязать</button>
+          </form>
+          {% else %}
+          <form method="post" action="{{ url_for('subdomains_bind', target_id=target.id) }}"
+                class="inline-del"
+                onsubmit="return confirm('Привязать поддомен {{ s.subdomain }} к объекту?');">
+            <input type="hidden" name="action" value="bind_one">
+            <input type="hidden" name="subdomain" value="{{ s.subdomain }}">
+            <button type="submit" class="btn primary" {% if not s.ip and not s.resolved_ip %}disabled title="Нет IP — нечего привязывать"{% endif %}>Привязать</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+
+  <p class="legend">
+    <span class="row-legend row-new">актуальный</span> — обнаружен в последнем скане;
+    <span class="row-legend row-gone">исчезнувший</span> — был ранее, сейчас не найден;
+    <span class="row-legend row-conflict">конфликт</span> — разные IP от разных утилит (нужен resolve).
+  </p>
+  {% endif %}
+</section>
+
+{% endblock %}

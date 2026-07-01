@@ -50,6 +50,7 @@ import dns_recon  # noqa: E402
 import logsetup  # noqa: E402
 import preflight  # noqa: E402
 import cve_lookup  # noqa: E402
+import errorsink  # noqa: E402
 
 
 # Профили таймингов, согласованные с защитой Palo Alto SYN Flood.
@@ -552,7 +553,7 @@ def run_main_scan(target_id, dry_run=False):
     return run_scan(target_id, scan_class="main", dry_run=dry_run, **MAIN_PRESET)
 
 
-def collect_domain_targets(target_id, dns_brute=False, log=None):
+def collect_domain_targets(target_id, dns_brute=False, log=None, sink=None):
     """Разведка всех доменов, привязанных к объекту.
 
     Для каждого домена:
@@ -589,6 +590,13 @@ def collect_domain_targets(target_id, dns_brute=False, log=None):
         if res["tools_missing"]:
             _log(f"[dns] {domain}: не найдены утилиты: "
                  f"{', '.join(res['tools_missing'])}")
+            # Треб. 2/3: фиксируем graceful degradation DNS-разведки
+            # (какие утилиты отсутствуют) — как «мягкую» запись в ошибках.
+            if sink is not None:
+                sink.degraded(
+                    "dns_recon",
+                    f"{domain}: не найдены утилиты DNS-разведки: "
+                    f"{', '.join(res['tools_missing'])} (пропущены)")
         # IP самого домена и поддоменов.
         for ip, source in res["ips"].items():
             extra_ips.add(ip)
@@ -632,9 +640,18 @@ def run_scan(target_id, profile="stealth", ports=None, top_ports=DEFAULT_TOP_POR
     # Весь ход скана пишется в netinv_YYMMDD_TIME.log и дублируется в консоль.
     slog = logsetup.ScanLogger(run_id=None, echo_console=True)
 
+    # —— Коллектор ошибок и статусов модулей (v1.6.0, треб. 2, 3) ——
+    # Буферизует всё до появления run_id, затем сбрасывает в БД. Ошибки
+    # инструментов, проходящие через log(), перехватываются по шаблонам.
+    sink = errorsink.ErrorSink()
+
     def log(msg):
-        """Единая точка логирования: в файл лога + консоль (треб. 5, 7)."""
+        """Единая точка логирования: в файл лога + консоль (треб. 5, 7).
+        Дополнительно распознаёт ОЧЕВИДНЫЕ ошибки инструментов и дублирует
+        их в scan_errors (треб. 3) — недоступность OSV, HTTP 400, сбои
+        парсинга и т.п. Результаты скана (недоступность хостов) НЕ ловятся."""
         slog.log(msg)
+        sink.scan_log_line(msg)
 
     slog.section(f"НАЧАЛО СКАНИРОВАНИЯ: {target['name']} ({target['cidr']})")
     log(f"Класс скана: {scan_class}; режим SYN: {syn_mode}; профиль: {profile}")
@@ -642,19 +659,42 @@ def run_scan(target_id, profile="stealth", ports=None, top_ports=DEFAULT_TOP_POR
     # —— Проверка наличия утилит (треб. 6) ——
     slog.section("ПРОВЕРКА УТИЛИТ (треб. 6)")
     pf = preflight.preflight(log=log)
+    # Базовые модули: nmap всегда применяется (без него скан падает).
+    sink.module("nmap", errorsink.STATUS_USED)
+    sink.module("nse", errorsink.STATUS_USED if extra_nse
+                else errorsink.STATUS_OFF,
+                None if extra_nse else "NSE-скрипты отключены опциями")
+    sink.module("cve_offline", errorsink.STATUS_USED)
     # Если nmap NSE vulners не найден — отключаем vulners (graceful), CVE
     # продолжают работать через offline-таблицу и онлайн NVD/OSV.
-    if cve_vulners and not pf.get("nse_vulners"):
-        log("nmap NSE vulners не обнаружен — сопоставление CVE через vulners "
-            "пропущено (offline-таблица и онлайн NVD/OSV работают).")
+    if not cve_vulners:
+        sink.module("nse_vulners", errorsink.STATUS_OFF,
+                    "vulners отключён опциями запуска")
+    elif not pf.get("nse_vulners"):
+        msg = ("nmap NSE vulners не обнаружен — сопоставление CVE через "
+               "vulners пропущено (offline-таблица и онлайн NVD/OSV работают)")
+        log(msg)
+        sink.module("nse_vulners", errorsink.STATUS_SKIPPED_MISSING,
+                    "NSE-скрипт vulners не установлен")
         cve_vulners = False
+    else:
+        sink.module("nse_vulners", errorsink.STATUS_USED)
 
     # Однократная проверка доступности OSV при запуске (треб. 5 v1.5.0).
     # Делается ОДИН раз за скан, чтобы в терминал не сыпались однотипные
     # ошибки «Connection refused» на каждый продукт. Если OSV недоступен,
     # онлайн-запросы пропускаются, работает offline-таблица (graceful).
     if cve_online:
-        cve_lookup.osv_healthcheck(log=log)
+        osv_ok = cve_lookup.osv_healthcheck(log=log)
+        if osv_ok:
+            sink.module("cve_online", errorsink.STATUS_USED)
+        else:
+            # Ошибка недоступности уже зафиксирована через log() → sink.
+            sink.module("cve_online", errorsink.STATUS_SKIPPED_DEGRADED,
+                        "api.osv.dev недоступен (нет выхода в Интернет/геоблоки)")
+    else:
+        sink.module("cve_online", errorsink.STATUS_OFF,
+                    "онлайн-CVE отключён опциями запуска")
 
     started = dt.datetime.now().isoformat(timespec="seconds")
     xml_fd, xml_out = tempfile.mkstemp(suffix=".xml", prefix="nmap_")
@@ -664,7 +704,26 @@ def run_scan(target_id, profile="stealth", ports=None, top_ports=DEFAULT_TOP_POR
     # Собираем IP из привязанных доменов и добавляем их к сканированию.
     slog.section("DNS-РАЗВЕДКА ДОМЕНОВ")
     extra_ips, ip_sources, fqdn_by_ip, recon_log = collect_domain_targets(
-        target_id, dns_brute=dns_brute, log=log)
+        target_id, dns_brute=dns_brute, log=log, sink=sink)
+    # Статусы DNS-модулей (треб. 2). Если доменов нет — DNS-разведка
+    # не выполнялась (нечего разведывать).
+    if db.domains_for_target(target_id):
+        sink.module("dns_recon", errorsink.STATUS_USED)
+        sink.module("dns_brute", errorsink.STATUS_USED if dns_brute
+                    else errorsink.STATUS_OFF,
+                    None if dns_brute else "brute-force поддоменов отключён")
+    sink.module("dig_rdns", errorsink.STATUS_USED if dig_rdns
+                else errorsink.STATUS_OFF,
+                None if dig_rdns else "обратный DNS отключён опциями")
+    sink.module("webscan", errorsink.STATUS_USED if do_web
+                else errorsink.STATUS_OFF,
+                None if do_web else "web-проверка отключена опциями")
+    # Тяжёлые web-инструменты запускаются только в расширенном скане
+    # (чтобы не триггерить пороги Palo Alto в основном).
+    if do_web and scan_class != "advanced":
+        for _m in ("nikto", "wpscan", "dalfox"):
+            sink.module(_m, errorsink.STATUS_OFF,
+                        "тяжёлые проверки отключены в основном скане (Palo Alto)")
     # Множество внешних IP (из DNS-обогащения) — НЕ за Palo Alto (треб. 2).
     external_ips = set(extra_ips)
 
@@ -685,16 +744,36 @@ def run_scan(target_id, profile="stealth", ports=None, top_ports=DEFAULT_TOP_POR
     cmd = build_nmap_cmd(target_spec, xml_out, profile, ports,
                          top_ports, full_ports, extra_nse, syn_mode)
     cmd_str = " ".join(cmd)
-    # Краткие опции сохраняем только для расширенного скана (история).
+    # Краткие опции сохраняем только для расширенного скана (старая история).
     options_json = None
     if scan_class == "advanced":
         options_json = _build_options_json(syn_mode, profile, ports, top_ports,
                                            full_ports, extra_nse, do_web, advanced_anp,
                                            dig_rdns=dig_rdns, dns_brute=dns_brute)
+    # v1.6.0 (треб. 2): полный набор опций — для ОБОИХ классов (раскрывающийся
+    # список «опции»: обход SYN-защиты, обратный DNS и прочее).
+    options_full_json = _build_options_json(
+        syn_mode, profile, ports, top_ports, full_ports, extra_nse, do_web,
+        advanced_anp, dig_rdns=dig_rdns, dns_brute=dns_brute)
     run_id = db.create_run(target_id, started, f"{profile}/{syn_mode}", cmd_str,
-                           scan_class=scan_class, options_json=options_json)
+                           scan_class=scan_class, options_json=options_json,
+                           options_full_json=options_full_json)
     # Привязываем run_id к логу (имя логгера уже создано; работаем дальше).
     slog.run_id = run_id
+    # v1.6.0 (треб. 4): сохраняем путь к файлу лога для «ссылки на лог».
+    try:
+        db.set_run_log_path(run_id, slog.path)
+    except Exception:  # noqa: BLE001
+        pass
+    # v1.6.0 (треб. 2, 3): сбрасываем накопленные ошибки/статусы модулей
+    # в БД (до этого run_id не существовал) + сохраняем modules_json.
+    sink.bind_run(run_id)
+    db.set_run_modules_json(run_id, sink.modules_json())
+    # Отмечаем присутствие поддоменов в этом запуске (треб. 5): те, что
+    # обнаружены сейчас — present=1, остальные — present=0 («исчезли»).
+    # add_subdomain в разведке вызывался без run_id — проставляем его теперь
+    # по времени старта (разведка шла после started).
+    db.mark_subdomains_run(target_id, run_id, since=started)
     log(f"[*] Запуск #{run_id} для {target['name']} ({target['cidr']})")
     log(f"[*] Команда nmap: {cmd_str}")
 
@@ -738,7 +817,10 @@ def run_scan(target_id, profile="stealth", ports=None, top_ports=DEFAULT_TOP_POR
             parsed = parse_nmap_xml(xml_out, syn_mode)
         except ET.ParseError as e:
             parsed = []
-            log_lines.append(f"Ошибка парсинга XML: {e}")
+            # Через log() — чтобы попало в scan_errors (треб. 3, перехват parse).
+            emsg = f"Ошибка парсинга XML: {e}"
+            log(emsg)
+            log_lines.append(emsg)
 
         anp_hosts = []  # (host_id, ip) узлов alive_no_ports для advanced-проверки
         for h in parsed:
@@ -815,8 +897,11 @@ def run_scan(target_id, profile="stealth", ports=None, top_ports=DEFAULT_TOP_POR
                                 ports_info=ports_info)
                         except Exception as e:  # noqa: BLE001
                             vfindings = []
-                            log_lines.append(
-                                f"assess_vulns({info['url']}) ошибка: {e}")
+                            # Через log() — чтобы ошибка попала и в журнал, и в
+                            # scan_errors (треб. 3, перехват по шаблону webscan).
+                            emsg = f"assess_vulns({info['url']}) ошибка: {e}"
+                            log(emsg)
+                            log_lines.append(emsg)
                         for vf in vfindings:
                             # Фильтр уровня «инфо» (треб. 6 v1.5.0): если
                             # include_info=False, информационные находки

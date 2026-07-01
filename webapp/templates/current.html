@@ -1,0 +1,151 @@
+{% extends "base.html" %}
+{% block title %}Текущее сканирование — NetInv{% endblock %}
+{% block body_class %}report-page{% endblock %}
+{% block content %}
+
+{% from "_report_macros.html" import report_table %}
+{% from "_run_macros.html" import errors_cell %}
+
+{% if active_list %}
+  {# Есть активные фоновые сканы — показываем их статус (треб. 4). #}
+  <section class="card">
+    <h2>Активные сканирования ({{ active_list|length }})</h2>
+    <p class="muted small">Статус обновляется автоматически. По завершении сканов
+      здесь появятся результаты последнего основного скана.</p>
+    <table class="tbl">
+      <thead>
+        <tr><th>Объект</th><th>CIDR</th><th>Класс</th><th>Параметры</th><th>Запущено</th><th>Статус</th></tr>
+      </thead>
+      <tbody id="active-body">
+      {% for a in active_list %}
+        <tr>
+          <td><strong>{{ a.target.name if a.target else '#' ~ a.target_id }}</strong></td>
+          <td><code>{{ a.target.cidr if a.target else '—' }}</code></td>
+          <td>
+            {% if a.scan_class == 'main' %}<span class="badge cls-main">основное</span>
+            {% else %}<span class="badge cls-adv">расширенное</span>{% endif %}
+          </td>
+          <td class="muted small">{{ a.label or '—' }}</td>
+          <td class="nowrap">{{ a.started_at|fmtdate }}</td>
+          <td><span class="badge running">выполняется <span class="spinner"></span></span></td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </section>
+{% elif last_run %}
+  {# Активных нет — показываем результаты ПОСЛЕДНЕГО основного скана (треб. 4). #}
+  <section class="card">
+    <div class="report-head">
+      <div>
+        <h2>Последнее основное сканирование{% if last_target %}: {{ last_target.name }}{% endif %}</h2>
+        <p class="muted">
+          Запуск #{{ last_run.id }} от {{ last_run.started_at|fmtdate }}
+          {% if last_target %}<code>{{ last_target.cidr }}</code>{% endif %}.
+          Сейчас активных сканирований нет.
+        </p>
+      </div>
+      <div class="report-actions">
+        {% if last_target %}
+        <a class="btn" href="{{ url_for('report_csv', target_id=last_target.id, scan_class='main') }}">⬇ CSV</a>
+        <a class="btn" target="_blank" rel="noopener"
+           href="{{ url_for('report_full', target_id=last_target.id, scan_class='main') }}">⧉ Открыть в отдельном окне</a>
+        <a class="btn" href="{{ url_for('report', target_id=last_target.id) }}">Полный отчёт объекта →</a>
+        {% endif %}
+      </div>
+    </div>
+
+    {% if summary %}
+    <div class="report-summary">
+      <span class="sum-chip">Всего узлов: <strong>{{ summary.total }}</strong></span>
+      <span class="sum-chip sum-live">«живые»: <strong>{{ summary.live }}</strong></span>
+      <span class="sum-chip sum-palo">артефакты Palo Alto: <strong>{{ summary.palo }}</strong></span>
+      {% if subs_summary %}
+        <a class="sum-chip sum-link" href="{{ url_for('subdomains_window', target_id=last_run.target_id) }}"
+           title="Открыть окно поддоменов">поддомены: <strong>{{ subs_summary.total }}</strong></a>
+      {% endif %}
+      {% if summary.crit %}<span class="sum-chip sum-crit">критичные: <strong>{{ summary.crit }}</strong></span>{% endif %}
+    </div>
+    {% endif %}
+
+    {# Живые хосты. #}
+    <h3 class="section-title live">✅ Гарантированно «живые» хосты ({{ live_rows|length }})</h3>
+    {% if live_rows %}
+      {{ report_table(live_rows, tkey='current-live', editable=false) }}
+    {% else %}
+      <p class="muted">Нет хостов с подтверждёнными сервисами.</p>
+    {% endif %}
+
+    {# Артефакты Palo Alto. #}
+    <h3 class="section-title palo">⚠ Возможные артефакты защиты Palo Alto ({{ palo_rows|length }})</h3>
+    {% if palo_rows %}
+      {{ report_table(palo_rows, tkey='current-palo', editable=false) }}
+    {% else %}
+      <p class="muted">Нет узлов-кандидатов на артефакты Palo Alto.</p>
+    {% endif %}
+  </section>
+
+  {# Поддомены последнего скана. #}
+  {% if subdomains %}
+  <section class="card">
+    <h3 class="section-title">🔎 Поддомены ({{ subdomains|length }})</h3>
+    <p class="muted small">
+      <a href="{{ url_for('subdomains_window', target_id=last_run.target_id) }}">Открыть окно управления поддоменами →</a>
+    </p>
+    <div class="table-scroll">
+    <table class="tbl">
+      <thead>
+        <tr><th>Родительский домен</th><th>Поддомен</th><th>IP</th><th>Утилита</th><th>Найдено</th></tr>
+      </thead>
+      <tbody>
+      {% for s in subdomains %}
+        <tr>
+          <td><code>{{ s.parent }}</code></td>
+          <td><code>{{ s.subdomain }}</code></td>
+          <td>{{ s.ip or '—' }}</td>
+          <td><span class="badge">{{ s.tool or '—' }}</span></td>
+          <td class="nowrap">{{ s.found_at|fmtdate }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+  </section>
+  {% endif %}
+
+  {# Ошибки сканирования последнего скана (треб. 3). #}
+  <section class="card">
+    <h3 class="section-title">⚠ Ошибки сканирования</h3>
+    {{ errors_cell(last_run) }}
+  </section>
+{% else %}
+  <section class="card">
+    <h2>Текущее сканирование</h2>
+    <p class="muted">Сейчас активных сканирований нет, и завершённых основных
+      сканов пока не найдено. Запустите скан на вкладке «Объекты сканирования».</p>
+  </section>
+{% endif %}
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Треб. 4: автоопрос статуса активных сканов. Если число активных изменилось
+// (скан начался/завершился) — перезагружаем страницу для актуальных данных.
+(function () {
+  var initial = {{ active_list|length }};
+  function poll() {
+    fetch("{{ url_for('current_status') }}")
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        if (j.count !== initial) {
+          window.location.reload();
+        }
+      })
+      .catch(function () { /* тихо игнорируем сетевые сбои */ });
+  }
+  // Опрашиваем каждые 5 с только при наличии активных или для отслеживания старта.
+  setInterval(poll, 5000);
+})();
+</script>
+{% endblock %}

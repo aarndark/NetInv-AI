@@ -15,6 +15,13 @@
 #                                    alive_no_ports). Без параметров.
 #    ./netinv adduser               Создать/обновить локального пользователя
 #                                    NetInv (интерактивно, группа cpt).
+#    ./netinv -dbreset              Обнулить БД и всю ИСТОРИЮ сканирований.
+#                                    Пользователи, объекты сканирования и
+#                                    файлы ./logs СОХРАНЯЮТСЯ. С подтверждением.
+#    ./netinv -fullreset            Полный откат к «чистой» версии (как после
+#                                    установки): удаляет ВСЮ базу (пользователи,
+#                                    объекты, история). Требует авторизации
+#                                    пользователя проекта и подтверждения.
 #    ./netinv logpath               Показать, куда фактически пишутся
 #                                    логи сканирований и почему (диагностика
 #                                    прав/владельца /opt/netinv/logs).
@@ -78,6 +85,18 @@ case "$cmd" in
     bootstrap; activate
     echo "${c_inf}[*]${c_off} Создание/обновление локального пользователя NetInv ..."
     exec python scanner/manage_users.py add "$@"
+    ;;
+
+  -dbreset|dbreset)
+    shift || true
+    bootstrap; activate
+    exec python scanner/reset_cli.py dbreset
+    ;;
+
+  -fullreset|fullreset)
+    shift || true
+    bootstrap; activate
+    exec python scanner/reset_cli.py fullreset
     ;;
 
   logpath|where-logs|logs)
