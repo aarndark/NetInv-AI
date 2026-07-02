@@ -10,13 +10,18 @@ cve_lookup.py — сопоставление обнаруженных верси
      наиболее известные критичные CVE для типового периметрового ПО
      (Apache, nginx, OpenSSH, PHP, OpenSSL и т.п.). Используется всегда.
 
-  2. ОНЛАЙН-запрос к NVD/OSV по версии ПО — ВКЛЮЧЁН ПО УМОЛЧАНИЮ в основном
-     скане. Запрос выполняется СО СТОРОНЫ СКАНЕРА (не через цель), результат
-     кешируется. Любая сетевая ошибка/таймаут → graceful degradation
-     (используется только offline-таблица).
+  2. ОНЛАЙН-запрос к CIRCL cve-search (cve.circl.lu) по vendor/product —
+     ВКЛЮЧЁН ПО УМОЛЧАНИЮ. Источник доступен напрямую (без VPN,
+     без ключа API), агрегирует NVD/CVE 5.x. Запрос выполняется СО
+     СТОРОНЫ СКАНЕРА (не через цель), результат кешируется. Любая
+     сетевая ошибка/таймаут → graceful degradation (только offline).
 
   3. nmap NSE vulners — отдельный модуль (scanner вызывает nmap со скриптом
      vulners); здесь только парсинг его текстового/XML-вывода в находки.
+
+ИСТОРИЯ (v1.6.3): онлайн-источник переведён с OSV (api.osv.dev, требовал
+выхода через VPN из-за геоблокировок) на CIRCL cve-search, который
+открывается напрямую. VPN-обвязка удалена полностью.
 
 ВАЖНО (требование 3): каждая CVE-находка получает АДЕКВАТНЫЙ severity и поле
 «Обоснование severity», кликабельные ссылки на NVD и указание источника.
@@ -30,11 +35,6 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-try:
-    import vpnctl                     # управление AdGuard VPN для фазы CVE (v1.6.2)
-except ImportError:                   # запуск как пакета scanner.*
-    from . import vpnctl
-
 # Каталог кеша онлайн-ответов (CVE по продукту+версии).
 _CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                           "..", "data", "cve_cache")
@@ -43,108 +43,108 @@ _HTTP_TIMEOUT = 12                   # таймаут одного онлайн-
 _USER_AGENT = "NetInvScanner/1.4 (CPT inventory; offline-first CVE)"
 
 NVD_URL = ("https://nvd.nist.gov/vuln/detail/")   # база для кликабельных ссылок
-OSV_API = "https://api.osv.dev/v1/query"
-OSV_HEALTH = "https://api.osv.dev"                # для проверки доступности
+# CIRCL cve-search: поиск по vendor/product, без ключа, отдаёт CVE 5.x JSON.
+CIRCL_SEARCH = "https://cve.circl.lu/api/search/"   # + <vendor>/<product>
+CIRCL_HEALTH = "https://cve.circl.lu/api/cve/CVE-2021-44228"  # проверка доступности
 
-# --- Прокси/VPN (требование 5 v1.5.0) -------------------------------------
-# Если прямой egress к api.osv.dev заблокирован (геоблокировки, firewall,
-# корпоративный периметр), запросы OSV можно направить через HTTP(S)-прокси
-# или VPN. Адрес прокси берётся из NETINV_HTTPS_PROXY, либо из штатных
-# HTTPS_PROXY/https_proxy. Пример: export NETINV_HTTPS_PROXY=http://127.0.0.1:8080
-# (для VPN прокси не нужен — достаточно поднять туннель до запуска скана).
+# Выбор онлайн-источника: "circl" (по умолчанию) или "off" (только offline).
 
 
-def _osv_proxy():
-    """Адрес HTTP(S)-прокси для запросов OSV (или None)."""
+def _cve_source():
+    return (os.environ.get("NETINV_CVE_SOURCE") or "circl").strip().lower()
+
+
+# --- Прокси (требование 5 v1.5.0) --------------------------------------
+# Если прямой egress заблокирован, онлайн-запросы можно направить через
+# HTTP(S)-прокси (NETINV_HTTPS_PROXY либо штатные HTTPS_PROXY/https_proxy).
+# Пример: export NETINV_HTTPS_PROXY=http://127.0.0.1:8080
+
+
+def _http_proxy():
+    """Адрес HTTP(S)-прокси для онлайн-запросов CVE (или None)."""
     return (os.environ.get("NETINV_HTTPS_PROXY")
             or os.environ.get("HTTPS_PROXY")
             or os.environ.get("https_proxy")
             or None)
 
 
-def _osv_opener():
-    """urllib-opener с учётом прокси (если задан) для запросов OSV."""
-    proxy = _osv_proxy()
+def _http_opener():
+    """urllib-opener с учётом прокси (если задан) для онлайн-запросов."""
+    proxy = _http_proxy()
     if proxy:
         handler = urllib.request.ProxyHandler({"http": proxy, "https": proxy})
         return urllib.request.build_opener(handler)
-    # Без прокси — штатный опенер (учитывает системный VPN/маршруты).
     return urllib.request.build_opener()
 
 
-# Однократная проверка доступности OSV за процесс (чтобы не спамить в лог).
-_OSV_REACHABLE = None        # None — ещё не проверяли; True/False — результат
+# Однократная проверка доступности онлайн-источника за процесс (чтобы
+# не спамить в лог однотипными ошибками на каждый продукт).
+_ONLINE_REACHABLE = None     # None — ещё не проверяли; True/False — результат
 
 
-def osv_healthcheck(log=None, force=False):
-    """Однократная проверка доступности api.osv.dev при запуске скана.
+def online_healthcheck(log=None, force=False):
+    """Однократная проверка доступности онлайн-источника CVE при запуске.
 
-    Выполняется ОДИН раз за процесс (результат кешируется в _OSV_REACHABLE),
+    Выполняется ОДИН раз за процесс (результат кешируется в _ONLINE_REACHABLE),
     чтобы в терминал НЕ сыпались однотипные ошибки на каждый продукт.
-    При недоступности поясняет причину и подсказывает про VPN/прокси.
 
-    Возвращает True/False. force=True принудительно перепроверяет.
+    v1.6.3: источник — CIRCL cve-search (cve.circl.lu), доступен напрямую
+    без VPN. Возвращает True/False. force=True принудительно перепроверяет.
     """
-    global _OSV_REACHABLE
-    if _OSV_REACHABLE is not None and not force:
-        return _OSV_REACHABLE
+    global _ONLINE_REACHABLE
+    if _ONLINE_REACHABLE is not None and not force:
+        return _ONLINE_REACHABLE
 
     def _log(m):
         if log:
             log("[cve] " + m)
 
-    # v1.6.2: НАЧАЛО ФАЗЫ CVE — поднимаем AdGuard VPN на весь блок онлайн-CVE
-    # (по согласованию с пользователем). Прямой egress к api.osv.dev из сети
-    # объекта заблокирован; доступ появляется только через VPN. VPN гасится в
-    # cve_lookup.osv_teardown() в finally скана. Если VPN не поднялся —
-    # graceful degradation: онлайн-CVE пропускаются, offline-таблица работает.
-    vpn_ok = vpnctl.begin_cve_phase(log=log)
-    if not vpn_ok:
-        _OSV_REACHABLE = False
-        _log("Онлайн-CVE недоступны (VPN не поднят / не настроен). "
-             "Работает offline-таблица (graceful).")
-        return _OSV_REACHABLE
+    src = _cve_source()
+    if src == "off":
+        _ONLINE_REACHABLE = False
+        _log("Онлайн-источник CVE отключён (NETINV_CVE_SOURCE=off) — "
+             "работает только offline-таблица.")
+        return _ONLINE_REACHABLE
 
-    proxy = _osv_proxy()
+    proxy = _http_proxy()
     proxy_note = f" через прокси {proxy}" if proxy else ""
-    # Лёгкий GET к корню API (дешёвле и не требует валидного payload).
+    # Лёгкий GET к известному CVE (Log4Shell) — проверка достижимости хоста.
     req = urllib.request.Request(
-        OSV_HEALTH, headers={"User-Agent": _USER_AGENT})
+        CIRCL_HEALTH, headers={"User-Agent": _USER_AGENT})
     try:
-        opener = _osv_opener()
+        opener = _http_opener()
         with opener.open(req, timeout=_HTTP_TIMEOUT) as resp:
-            # Любой HTTP-ответ (вкл. 404 на корне) означает, что хост доступен.
             _ = resp.status
-        _OSV_REACHABLE = True
-        _log(f"OSV доступен{proxy_note} — онлайн-поиск CVE включён.")
+        _ONLINE_REACHABLE = True
+        _log(f"CIRCL cve-search доступен{proxy_note} — онлайн-поиск CVE включён.")
     except urllib.error.HTTPError:
-        # HTTP-ошибка (напр. 404/405 на корне) = хост всё равно достижим.
-        _OSV_REACHABLE = True
-        _log(f"OSV доступен{proxy_note} — онлайн-поиск CVE включён.")
+        # Любой HTTP-ответ (даже 4xx) = хост достижим.
+        _ONLINE_REACHABLE = True
+        _log(f"CIRCL cve-search доступен{proxy_note} — онлайн-поиск CVE включён.")
     except Exception as e:  # noqa: BLE001
-        _OSV_REACHABLE = False
-        _log(f"OSV НЕДОСТУПЕН{proxy_note}: {e}")
-        _log("Причина: нет прямого выхода в Интернет (геоблокировки / firewall / "
-             "корпоративный периметр). Онлайн-CVE пропускаются, работает offline-таблица.")
-        _log("Решение: проверьте AdGuard VPN (adguardvpn-cli status) либо задайте прокси: "
-             "export NETINV_HTTPS_PROXY=http://HOST:PORT  (см. README, раздел «Новое в 1.6.2»).")
-    return _OSV_REACHABLE
+        _ONLINE_REACHABLE = False
+        _log(f"CIRCL cve-search НЕДОСТУПЕН{proxy_note}: {e}")
+        _log("Причина: нет прямого выхода к cve.circl.lu (firewall / периметр). "
+             "Онлайн-CVE пропускаются, работает offline-таблица.")
+        _log("Решение: задайте прокси export NETINV_HTTPS_PROXY=http://HOST:PORT "
+             "(см. README, раздел «Новое в 1.6.3»).")
+    return _ONLINE_REACHABLE
 
 
-def osv_teardown(log=None):
-    """Завершить фазу онлайн-CVE: отключить VPN (v1.6.2).
+def online_teardown(log=None):
+    """Завершить фазу онлайн-CVE (v1.6.3).
 
-    Вызывается в finally скана НЕЗАВИСИМО от исхода (успех/ошибка/отмена).
-    Никогда не бросает исключений. Сбрасывает кеш доступности, чтобы следующий
-    скан снова поднял VPN и перепроверил OSV.
+    Вызывается в finally скана НЕЗАВИСИМО от исхода. VPN больше не используется,
+    поэтому здесь только сброс кеша доступности, чтобы следующий скан заново
+    перепроверил источник. Никогда не бросает исключений.
     """
-    global _OSV_REACHABLE
-    try:
-        vpnctl.end_cve_phase(log=log)
-    finally:
-        # Следующий скан должен заново проверить доступность (VPN будет
-        # подниматься заново), поэтому сбрасываем кеш результата healthcheck.
-        _OSV_REACHABLE = None
+    global _ONLINE_REACHABLE
+    _ONLINE_REACHABLE = None
+
+
+# Совместимость со старыми именами (scanner.py мог их вызывать).
+osv_healthcheck = online_healthcheck
+osv_teardown = online_teardown
 
 
 # ==========================================================================
@@ -229,7 +229,8 @@ def lookup_offline(product, version):
 
 
 # ==========================================================================
-# 2) ОНЛАЙН-запрос к OSV/NVD по версии (кешируемый, graceful degradation)
+# 2) ОНЛАЙН-запрос к CIRCL cve-search по vendor/product
+#    (кешируемый, graceful degradation)
 # ==========================================================================
 
 def _cache_path(product, version):
@@ -258,6 +259,17 @@ def _cache_put(product, version, data):
         pass
 
 
+def _clear_cache():
+    """Очистить кеш онлайн-ответов (вспомогательно для тестов)."""
+    try:
+        if os.path.isdir(_CACHE_DIR):
+            for fn in os.listdir(_CACHE_DIR):
+                if fn.endswith(".json"):
+                    os.remove(os.path.join(_CACHE_DIR, fn))
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _cvss_to_severity(score):
     """CVSS-балл → severity для отображения (треб. 3: адекватный уровень)."""
     try:
@@ -274,70 +286,142 @@ def _cvss_to_severity(score):
 
 
 # ==========================================================================
-# 2a) МАППИНГ баннеров nmap → OSV package.name + ecosystem (v1.6.2)
+# 2a) МАППИНГ баннеров nmap → CIRCL vendor/product (v1.6.3)
 # ==========================================================================
-# ПРОБЛЕМА (подтверждена диагностикой пользователя): OSV /v1/query ТРЕБУЕТ,
-# чтобы при идентификации по имени были заданы И name, И ecosystem. Запрос
-# только с package.name (как слал NetInv до 1.6.2) → HTTP 400 "Invalid query".
-# Кроме того, баннеры nmap («Apache httpd», «Golang net/http server»,
-# «Cisco Expressway E») — это НЕ имена пакетов в экосистемах OSV, поэтому даже
-# корректный по формату запрос не находил CVE.
+# CIRCL cve-search ищет по паре vendor/product (CPE-совместимо). Баннеры nmap
+# («Apache httpd», «Golang net/http server», «OpenSSH») — не CPE-имена,
+# поэтому нужна таблица сопоставления баннер → (vendor, product, need_ver).
+# need_ver=True: без версии CVE-шум слишком велик, поэтому онлайн-запрос без
+# версии пропускаем (используется offline-таблица).
 #
-# РЕШЕНИЕ: таблица сопоставления. Каждая запись —
-#   (regex по нормализованной строке "product", (osv_name, ecosystem, need_ver))
-# need_ver=True означает, что без версии запрос к OSV бессмысленен (шлём только
-# при наличии версии). Для C/C++-демонов (apache/nginx/openssh) берём
-# экосистему OSS-Fuzz — там эти проекты интегрированы. Для стандартной
-# библиотеки Go — stdlib/Go. Экосистемы совпадают с перечнем OSV.
 # ВАЖНО: альтернативы группируем скобками, иначе приоритет | ломает \b-границы
 # (например "httpd" без границ матчил бы "lighttpd"). Порядок записей значим:
 # сначала более специфичные продукты.
-_OSV_MAP = [
+_CIRCL_MAP = [
     # Apache HTTP Server: "Apache", "Apache httpd", "apache2" — но НЕ "lighttpd".
     (re.compile(r"\bapache(?:2)?\b|\bhttpd\b", re.I),
-     ("apache", "OSS-Fuzz", True)),
-    (re.compile(r"\bnginx\b", re.I),           ("nginx", "OSS-Fuzz", True)),
-    # OpenSSH: "OpenSSH" или отдельное слово "ssh" (но не внутри других слов).
-    (re.compile(r"\b(?:openssh|ssh)\b", re.I),  ("openssh", "OSS-Fuzz", True)),
-    (re.compile(r"\bopenssl\b", re.I),         ("openssl", "OSS-Fuzz", True)),
-    (re.compile(r"\bcurl\b", re.I),            ("curl", "OSS-Fuzz", True)),
-    (re.compile(r"\bsqlite\b", re.I),          ("sqlite3", "OSS-Fuzz", True)),
-    (re.compile(r"\bpostgre\w*", re.I),        ("postgresql", "OSS-Fuzz", True)),
-    # Go: стандартная библиотека (net/http server и т.п.) → stdlib/Go.
+     ("apache", "http_server", True)),
+    (re.compile(r"\bnginx\b", re.I),           ("nginx", "nginx", True)),
+    # OpenSSH: "OpenSSH" или отдельное слово "ssh". Vendor в CPE — openbsd.
+    (re.compile(r"\b(?:openssh|ssh)\b", re.I),  ("openbsd", "openssh", True)),
+    (re.compile(r"\bopenssl\b", re.I),         ("openssl", "openssl", True)),
+    (re.compile(r"\bcurl\b", re.I),            ("haxx", "curl", True)),
+    (re.compile(r"\bsqlite\b", re.I),          ("sqlite", "sqlite", True)),
+    (re.compile(r"\bpostgre\w*", re.I),        ("postgresql", "postgresql", True)),
+    # Go: стандартная библиотека / net/http.
     (re.compile(r"\bgo(?:lang)?\b|net/http", re.I),
-     ("stdlib", "Go", True)),
-    # Интерпретируемые экосистемы — прямое соответствие имени пакета.
-    (re.compile(r"\bpython\b", re.I),          ("cpython", "OSS-Fuzz", True)),
+     ("golang", "go", True)),
+    (re.compile(r"\bpython\b", re.I),          ("python", "python", True)),
+    (re.compile(r"\bproftpd\b", re.I),         ("proftpd", "proftpd", True)),
+    (re.compile(r"\bvsftpd\b", re.I),          ("vsftpd", "vsftpd", True)),
+    (re.compile(r"\bbind\b|\bnamed\b", re.I),  ("isc", "bind", True)),
+    (re.compile(r"\bsamba\b|\bsmbd\b", re.I),  ("samba", "samba", True)),
+    (re.compile(r"\bdovecot\b", re.I),         ("dovecot", "dovecot", True)),
+    (re.compile(r"\blighttpd\b", re.I),        ("lighttpd", "lighttpd", True)),
+    (re.compile(r"\bexim\b", re.I),            ("exim", "exim", True)),
+    (re.compile(r"\bpostfix\b", re.I),         ("postfix", "postfix", True)),
 ]
 
 
-def map_to_osv(product):
-    """Сопоставить баннер продукта с (osv_name, ecosystem, need_version).
+def map_to_circl(product):
+    """Сопоставить баннер продукта с (vendor, product, need_version) для CIRCL.
 
-    Возвращает None, если продукт не удалось сопоставить с экосистемой OSV —
-    в этом случае онлайн-запрос НЕ выполняется (был бы HTTP 400 или пусто).
+    Возвращает None, если продукт не удалось сопоставить — в этом случае
+    онлайн-запрос НЕ выполняется (использовалась бы только offline-таблица).
     """
     s = str(product or "").strip().lower()
     if not s:
         return None
-    for rx, spec in _OSV_MAP:
+    for rx, spec in _CIRCL_MAP:
         if rx.search(s):
             return spec
     return None
 
 
-def lookup_osv(product, version, log=None):
-    """Онлайн-запрос к OSV (api.osv.dev) по продукту+версии.
+# Обратная совместимость: старое имя map_to_osv → map_to_circl.
+map_to_osv = map_to_circl
+
+
+# --- Сравнение версий и фильтр «затронута ли версия» ----------------------
+
+def _version_tuple(v):
+    """Числовой кортеж версии для сравнения (напр. '2.4.49' → (2,4,49))."""
+    parts = re.findall(r"\d+", str(v or ""))
+    return tuple(int(x) for x in parts) if parts else None
+
+
+def _version_affected(rec, target):
+    """Затронута ли target-версия записью CVE 5.x.
+
+    Возвращает True (затронута), False (точно не затронута по указанным
+    диапазонам) или None (диапазоны не заданы — неизвестно, оставляем CVE).
+    """
+    tv = _version_tuple(target)
+    if tv is None:
+        return None
+    cna = (rec.get("containers") or {}).get("cna") or {}
+    saw_range = False
+    for aff in (cna.get("affected") or []):
+        for ver in (aff.get("versions") or []):
+            if ver.get("status") != "affected":
+                continue
+            base = _version_tuple(ver.get("version"))
+            lte = _version_tuple(ver.get("lessThanOrEqual"))
+            lt = _version_tuple(ver.get("lessThan"))
+            if lte or lt:
+                saw_range = True
+                lo_ok = (base is None) or (base <= tv)
+                hi_ok = (tv <= lte) if lte else (tv < lt)
+                if lo_ok and hi_ok:
+                    return True
+            elif base is not None:
+                saw_range = True
+                if tv == base:
+                    return True
+    return False if saw_range else None
+
+
+def _extract_cvss(rec):
+    """Извлечь (cvss_балл, severity) из metrics записи CVE 5.x (cna, затем adp)."""
+    def scan(cont):
+        for m in (cont.get("metrics") or []):
+            for k, v in m.items():
+                if isinstance(v, dict) and v.get("baseScore") is not None:
+                    return (str(v.get("baseScore")),
+                            str(v.get("baseSeverity") or "").lower())
+        return None
+    containers = rec.get("containers") or {}
+    got = scan(containers.get("cna") or {})
+    if not got:
+        for c in (containers.get("adp") or []):
+            got = scan(c)
+            if got:
+                break
+    if not got:
+        return "", ""
+    return got
+
+
+def _extract_desc(rec):
+    """Английское описание CVE из cna.descriptions."""
+    cna = (rec.get("containers") or {}).get("cna") or {}
+    for de in (cna.get("descriptions") or []):
+        if str(de.get("lang", "")).lower().startswith("en"):
+            return str(de.get("value") or "")
+    descs = cna.get("descriptions") or []
+    return str(descs[0].get("value")) if descs else ""
+
+
+# Максимум CVE-находок на один продукт (самые свежие идут первыми в ответе).
+_CIRCL_MAX_FINDINGS = 15
+
+
+def lookup_circl(product, version, log=None):
+    """Онлайн-запрос к CIRCL cve-search по vendor/product с фильтром по версии.
 
     Запрос выполняется СО СТОРОНЫ СКАНЕРА (не через цель). Любая ошибка/таймаут
-    → возвращается пустой список (graceful degradation). Результат кешируется.
-
-    v1.6.2: запрос формируется по таблице маппинга _OSV_MAP (name+ecosystem).
-    Заведомо некорректные запросы (нет версии/экосистемы, неизвестный продукт)
-    НЕ отправляются — это устраняет поток HTTP 400 «Invalid query».
+    → пустой список (graceful degradation). Результат кешируется.
     """
-    # Нормализуем вход: хвостовые пробелы в product/version — частая причина
-    # HTTP 400 Bad Request от OSV (требование 5 v1.5.0).
     product = str(product or "").strip()
     version = str(version or "").strip()
     if not product:
@@ -350,82 +434,87 @@ def lookup_osv(product, version, log=None):
         if log:
             log("[cve] " + m)
 
-    # Если однократная проверка уже показала, что OSV недоступен — не дёргаем
-    # сеть на каждый продукт (иначе в лог сыпятся однотипные ошибки).
-    if _OSV_REACHABLE is False:
+    # Если однократная проверка показала недоступность — не дёргаем сеть.
+    if _ONLINE_REACHABLE is False:
         _cache_put(product, version, [])
         return []
 
-    # v1.6.2: сопоставляем продукт с экосистемой OSV. Без сопоставления или без
-    # обязательной версии онлайн-запрос НЕ шлём (иначе гарантированный 400).
-    spec = map_to_osv(product)
+    spec = map_to_circl(product)
     if spec is None:
-        _log(f"OSV: продукт «{product}» не сопоставлен с экосистемой OSV "
+        _log(f"CIRCL: продукт «{product}» не сопоставлен с vendor/product "
              f"— онлайн-запрос пропущен (используется offline)")
         _cache_put(product, version, [])
         return []
-    osv_name, ecosystem, need_ver = spec
+    vendor, prod, need_ver = spec
     if need_ver and not version:
-        _log(f"OSV: для «{product}» ({osv_name}/{ecosystem}) нет версии "
+        _log(f"CIRCL: для «{product}» ({vendor}/{prod}) нет версии "
              f"— онлайн-запрос без версии не отправляю (используется offline)")
         _cache_put(product, version, [])
         return []
 
-    findings = []
-    # ФИКС HTTP 400 (v1.6.2): OSV требует ОДНОВРЕМЕННО package.name И
-    # package.ecosystem при идентификации по имени. Формируем корректный
-    # запрос; версию добавляем отдельным полем верхнего уровня.
-    query = {"package": {"name": osv_name, "ecosystem": ecosystem}}
-    if version:
-        query["version"] = version
-    payload = json.dumps(query).encode("utf-8")
-    req = urllib.request.Request(
-        OSV_API, data=payload,
-        headers={"Content-Type": "application/json", "User-Agent": _USER_AGENT})
+    url = (CIRCL_SEARCH + urllib.parse.quote(vendor) + "/"
+           + urllib.parse.quote(prod))
+    req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
     try:
-        opener = _osv_opener()
+        opener = _http_opener()
         with opener.open(req, timeout=_HTTP_TIMEOUT) as resp:
             data = json.loads(resp.read().decode("utf-8", "replace"))
     except urllib.error.HTTPError as e:
-        # 400 = OSV не понял запрос (неверный формат/неизвестный экосистема).
-        _log(f"OSV HTTP {e.code} для {product} {version or '(без версии)'} "
+        _log(f"CIRCL HTTP {e.code} для {vendor}/{prod} "
              f"— пропускаю (используется offline)")
         _cache_put(product, version, [])
         return []
     except Exception as e:  # noqa: BLE001
-        _log(f"OSV недоступен для {product} {version}: {e} (используется offline)")
-        _cache_put(product, version, [])      # кешируем «пусто», чтобы не долбить сеть
+        _log(f"CIRCL недоступен для {vendor}/{prod}: {e} (используется offline)")
+        _cache_put(product, version, [])
         return []
 
-    for vuln in (data.get("vulns") or [])[:10]:
-        cve_id = vuln.get("id", "")
-        # Пытаемся выбрать CVE-алиас, если id не CVE-формата.
-        aliases = vuln.get("aliases") or []
-        cve = next((a for a in [cve_id] + aliases if str(a).startswith("CVE-")),
-                   cve_id)
-        cvss = ""
-        sev = "info"
-        for s in (vuln.get("severity") or []):
-            sc = s.get("score", "")
-            m = re.search(r"(\d+\.\d+)", str(sc))
-            if m:
-                cvss = m.group(1)
-                sev = _cvss_to_severity(cvss)
-                break
+    # Ответ: {"results": {"nvd": [[cve_id, cve_record_5.x], ...]}, ...}
+    results = (data.get("results") or {})
+    rows = results.get("nvd") or results.get("cvelistv5") or []
+    findings = []
+    seen = set()
+    for row in rows:
+        if not isinstance(row, (list, tuple)) or len(row) < 2:
+            continue
+        cve_id, rec = row[0], row[1]
+        cve = str(cve_id or "").upper()
+        if not cve.startswith("CVE-") or cve in seen:
+            continue
+        if not isinstance(rec, dict):
+            continue
+        # Фильтр по версии: отбрасываем только те, что ТОЧНО не затронуты.
+        if version and _version_affected(rec, version) is False:
+            continue
+        cvss, sev = _extract_cvss(rec)
+        if not sev or sev not in ("critical", "high", "medium", "low"):
+            sev = _cvss_to_severity(cvss)
+        else:
+            sev = {"high": "critical", "medium": "warning",
+                   "low": "info", "critical": "critical"}.get(sev, sev)
+        seen.add(cve)
         findings.append({
             "cve_id": cve,
             "cvss": cvss,
             "severity": sev,
-            "desc": (vuln.get("summary") or vuln.get("details") or "")[:300],
-            "source": "osv",
+            "desc": _extract_desc(rec)[:300],
+            "source": "circl",
         })
+        if len(findings) >= _CIRCL_MAX_FINDINGS:
+            break
     _cache_put(product, version, findings)
     return findings
 
 
+# Обратная совместимость: старое имя lookup_osv → CIRCL.
+lookup_osv = lookup_circl
+
+
 def lookup_online(product, version, log=None):
-    """Объединяющий онлайн-поиск (сейчас OSV; NVD — через ссылку на детали)."""
-    return lookup_osv(product, version, log=log)
+    """Объединяющий онлайн-поиск (v1.6.3: CIRCL cve-search)."""
+    if _cve_source() == "off":
+        return []
+    return lookup_circl(product, version, log=log)
 
 
 # ==========================================================================
@@ -500,6 +589,7 @@ def build_cve_finding(product, version, url, cve, port=None):
     sev = cve.get("severity") or _cvss_to_severity(cvss)
     src_label = {
         "offline": "offline-таблица сигнатур NetInv",
+        "circl": "онлайн-запрос к CIRCL cve-search (cve.circl.lu)",
         "osv": "онлайн-запрос к OSV (api.osv.dev)",
         "nvd": "онлайн-запрос к NVD",
         "vulners": "nmap NSE vulners",
