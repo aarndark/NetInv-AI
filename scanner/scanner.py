@@ -51,6 +51,7 @@ import logsetup  # noqa: E402
 import preflight  # noqa: E402
 import cve_lookup  # noqa: E402
 import errorsink  # noqa: E402
+import scancontrol  # noqa: E402
 
 
 # Профили таймингов, согласованные с защитой Palo Alto SYN Flood.
@@ -548,9 +549,39 @@ def _build_options_json(syn_mode, profile, ports, top_ports, full_ports,
     }, ensure_ascii=False)
 
 
-def run_main_scan(target_id, dry_run=False):
+def _finalize_cancelled(run_id, slog, log, target_id, scan_class):
+    """v1.6.1 (правка 1): корректно завершить прерванный оператором скан.
+
+    Помечает запуск статусом «cancelled», фиксирует уже собранные узлы
+    через пересчёт состояний и закрывает подробный лог. Возвращает run_id.
+    """
+    finished = dt.datetime.now().isoformat(timespec="seconds")
+    try:
+        log("[!] Сканирование отменено оператором.")
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        db.finish_run(run_id, "cancelled", finished, 0,
+                      "Сканирование отменено оператором.")
+    except Exception:  # noqa: BLE001
+        pass
+    # Пересчитываем состояния по уже сохранённым узлам (если были).
+    try:
+        diff_engine.update_host_states(target_id, run_id, scan_class=scan_class)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        slog.section("✗ Сканирование ОТМЕНЕНО оператором")
+        slog.close()
+    except Exception:  # noqa: BLE001
+        pass
+    return run_id
+
+
+def run_main_scan(target_id, dry_run=False, control=None):
     """ОСНОВНОЙ скан — фиксированный пресет (MAIN_PRESET, scan_class='main')."""
-    return run_scan(target_id, scan_class="main", dry_run=dry_run, **MAIN_PRESET)
+    return run_scan(target_id, scan_class="main", dry_run=dry_run,
+                    control=control, **MAIN_PRESET)
 
 
 def collect_domain_targets(target_id, dns_brute=False, log=None, sink=None):
@@ -617,7 +648,7 @@ def run_scan(target_id, profile="stealth", ports=None, top_ports=DEFAULT_TOP_POR
              full_ports=False, extra_nse=False, do_web=True, dry_run=False,
              syn_mode="evasion", advanced_anp=False, scan_class="advanced",
              dig_rdns=False, dns_brute=False, cve_online=True, cve_vulners=True,
-             include_info=False):
+             include_info=False, control=None):
     """Полный цикл: nmap -> парсинг -> сохранение -> web-сканирование -> diff.
 
     scan_class: 'main' (основной, фиксированный пресет) либо 'advanced'
@@ -629,6 +660,11 @@ def run_scan(target_id, profile="stealth", ports=None, top_ports=DEFAULT_TOP_POR
     По умолчанию False — информационные находки НЕ сохраняются в БД
     (в ОСНОВНОМ скане и без галочки в расширенном). При True фиксируются все.
     """
+    # v1.6.1 (правка 1): точка контроля паузы/отмены между этапами.
+    def _ck():
+        if control is not None:
+            control.checkpoint()
+
     # Нормализуем имя уровня «инфо» для фильтрации (треб. 6).
     _INFO_SEVERITIES = {"info", "инфо", "informational"}
     db.init_db()
@@ -774,6 +810,11 @@ def run_scan(target_id, profile="stealth", ports=None, top_ports=DEFAULT_TOP_POR
     # add_subdomain в разведке вызывался без run_id — проставляем его теперь
     # по времени старта (разведка шла после started).
     db.mark_subdomains_run(target_id, run_id, since=started)
+    # v1.6.1 (правка 3): конфликты IP разрешаются АВТОМАТИЧЕСКИ —
+    # каждый поддомен остаётся в таблице одной строкой с актуальным IP.
+    n_res = db.auto_resolve_subdomains(target_id)
+    if n_res:
+        log(f"[*] Поддомены: автоматически разрешено конфликтов IP: {n_res}")
     log(f"[*] Запуск #{run_id} для {target['name']} ({target['cidr']})")
     log(f"[*] Команда nmap: {cmd_str}")
 
@@ -793,13 +834,18 @@ def run_scan(target_id, profile="stealth", ports=None, top_ports=DEFAULT_TOP_POR
         raise SystemExit("nmap отсутствует")
 
     log_lines = []
+    # v1.6.1 (правка 1): проверка паузы/отмены перед запуском nmap.
+    try:
+        _ck()
+    except scancontrol.ScanCancelled:
+        return _finalize_cancelled(run_id, slog, log, target_id, scan_class)
     # Треб. 7: запуск nmap с ПОТОКОВЫМ выводом в консоль и лог.
     slog.section("ЗАПУСК NMAP (потоковый вывод, треб. 7)")
     try:
         # Добавляем --stats-every для периодического прогресса в реальном времени.
         stream_cmd = cmd + ["--stats-every", "10s"]
         proc = logsetup.run_streamed(stream_cmd, timeout=60 * 90, slog=slog,
-                                     label="nmap")
+                                     label="nmap", control=control)
         log_lines.append((proc.stdout or "")[-4000:])
         if proc.returncode != 0:
             log_lines.append(f"nmap завершился с кодом {proc.returncode}")
@@ -810,6 +856,13 @@ def run_scan(target_id, profile="stealth", ports=None, top_ports=DEFAULT_TOP_POR
                       dt.datetime.now().isoformat(timespec="seconds"), 0, str(e))
         slog.close()
         raise
+
+    # v1.6.1 (правка 1): проверка отмены после nmap, до тяжёлой
+    # постобработки (парсинг XML, web-скан, CVE, diff).
+    try:
+        _ck()
+    except scancontrol.ScanCancelled:
+        return _finalize_cancelled(run_id, slog, log, target_id, scan_class)
 
     hosts_up = 0
     if os.path.exists(xml_out) and os.path.getsize(xml_out) > 0:
@@ -824,6 +877,10 @@ def run_scan(target_id, profile="stealth", ports=None, top_ports=DEFAULT_TOP_POR
 
         anp_hosts = []  # (host_id, ip) узлов alive_no_ports для advanced-проверки
         for h in parsed:
+            # v1.6.1 (правка 1): отмена в ходе web/CVE-обработки узлов —
+            # прерываем цикл между узлами, уже сохранённые данные остаются.
+            if control is not None and control.is_cancelled():
+                return _finalize_cancelled(run_id, slog, log, target_id, scan_class)
             if h["state"] != "up" and not h["ports"]:
                 continue
             hosts_up += 1

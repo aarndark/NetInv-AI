@@ -253,7 +253,7 @@ class ScanLogger:
 
 
 def run_streamed(cmd, timeout=None, slog=None, echo=True, label=None,
-                 capture=True):
+                 capture=True, control=None):
     """Запустить внешнюю команду с потоковым выводом в консоль и лог.
 
     cmd     — список аргументов команды (как для subprocess);
@@ -261,7 +261,10 @@ def run_streamed(cmd, timeout=None, slog=None, echo=True, label=None,
     slog    — экземпляр ScanLogger (или None) для записи строк в файл лога;
     echo    — печатать ли строки в консоль (stdout) в реальном времени;
     label   — короткая метка процесса для префикса строк (например, 'nmap');
-    capture — сохранять ли весь вывод и вернуть его строкой.
+    capture — сохранять ли весь вывод и вернуть его строкой;
+    control — ScanControl (или None): управление паузой/отменой (v1.6.1).
+              Процесс запускается в отдельной группе процессов, чтобы
+              пауза/отмена (SIGSTOP/SIGCONT/SIGTERM) действовали и на nmap.
 
     Возвращает объект с атрибутами .returncode и .stdout (как у
     subprocess.CompletedProcess), чтобы оставаться совместимым с прежним кодом.
@@ -296,15 +299,33 @@ def run_streamed(cmd, timeout=None, slog=None, echo=True, label=None,
     try:
         proc = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, bufsize=1)
+            text=True, bufsize=1, start_new_session=True)
     except FileNotFoundError as e:
         if slog is not None:
             slog.error("Не удалось запустить %s: %s", label, e)
         return subprocess.CompletedProcess(cmd, 127, "")
 
+    # v1.6.1 (правка 1): регистрируем процесс в ScanControl, чтобы
+    # пауза/отмена действовали на запущенный nmap.
+    if control is not None:
+        control.attach_proc(proc)
+    cancelled = False
     try:
         for line in iter(proc.stdout.readline, ""):
             _emit(line)
+            # Отмена: корректно завершаем процесс и выходим.
+            if control is not None and control.is_cancelled():
+                cancelled = True
+                try:
+                    proc.terminate()
+                except Exception:  # noqa: BLE001
+                    pass
+                msg = f"скан отменён оператором — процесс {label} остановлен"
+                if slog is not None:
+                    slog.warning(msg)
+                elif echo:
+                    sys.stdout.write(prefix + msg + "\n")
+                break
             if timeout is not None and (_time.time() - start) > timeout:
                 proc.kill()
                 msg = f"превышен таймаут {timeout}s — процесс {label} остановлен"
@@ -322,6 +343,9 @@ def run_streamed(cmd, timeout=None, slog=None, echo=True, label=None,
             proc.wait(timeout=10)
         except Exception:  # noqa: BLE001
             proc.kill()
+        if control is not None:
+            control.detach_proc(proc)
+    _ = cancelled
 
     return subprocess.CompletedProcess(
         cmd, proc.returncode if proc.returncode is not None else -1,

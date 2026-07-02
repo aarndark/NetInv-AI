@@ -45,6 +45,7 @@ import db            # noqa: E402
 import diff_engine   # noqa: E402
 import scanner       # noqa: E402
 import cve_lookup    # noqa: E402
+import scancontrol   # noqa: E402
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("NETINV_SECRET", "change-me-in-prod")
@@ -55,14 +56,19 @@ _RUNNING = {}
 _RUNNING_LOCK = threading.Lock()
 
 
-def _running_set(target_id, scan_class, label):
-    """Отметить начало фонового скана объекта (треб. 4)."""
+def _running_set(target_id, scan_class, label, control=None):
+    """Отметить начало фонового скана объекта (треб. 4).
+
+    v1.6.1 (правка 1): сохраняем объект ScanControl для управления
+    паузой/отменой активного скана из веб-интерфейса.
+    """
     with _RUNNING_LOCK:
         _RUNNING[int(target_id)] = {
             "target_id": int(target_id),
             "scan_class": scan_class,
             "label": label,
             "started_at": dt.datetime.now().isoformat(timespec="seconds"),
+            "control": control,
         }
 
 
@@ -81,6 +87,13 @@ def _running_get(target_id):
 def _running_all():
     with _RUNNING_LOCK:
         return {tid: dict(v) for tid, v in _RUNNING.items()}
+
+
+def _running_control(target_id):
+    """Вернуть объект ScanControl активного скана (или None)."""
+    with _RUNNING_LOCK:
+        st = _RUNNING.get(int(target_id))
+        return st.get("control") if st else None
 
 
 # ----------------------- авторизация -----------------------
@@ -136,7 +149,8 @@ def _bg_scan(target_id, profile, ports, top_ports, full_ports, extra_nse, do_web
              syn_mode, advanced_anp, dig_rdns=False, dns_brute=False,
              cve_online=True, cve_vulners=True, include_info=False):
     """Фоновый РАСШИРЕННЫЙ скан (scan_class='advanced')."""
-    _running_set(target_id, "advanced", "РАСШИРЕННОЕ сканирование")
+    control = scancontrol.ScanControl()
+    _running_set(target_id, "advanced", "РАСШИРЕННОЕ сканирование", control=control)
     try:
         scanner.run_scan(target_id, profile=profile, ports=ports or None,
                          top_ports=top_ports, full_ports=full_ports,
@@ -144,7 +158,7 @@ def _bg_scan(target_id, profile, ports, top_ports, full_ports, extra_nse, do_web
                          advanced_anp=advanced_anp, dig_rdns=dig_rdns,
                          dns_brute=dns_brute, scan_class="advanced",
                          cve_online=cve_online, cve_vulners=cve_vulners,
-                         include_info=include_info)
+                         include_info=include_info, control=control)
     except Exception as e:  # noqa: BLE001
         app.logger.error("advanced scan failed: %s", e)
     finally:
@@ -153,9 +167,10 @@ def _bg_scan(target_id, profile, ports, top_ports, full_ports, extra_nse, do_web
 
 def _bg_main_scan(target_id):
     """Фоновый ОСНОВНОЙ скан (фиксированный пресет, scan_class='main')."""
-    _running_set(target_id, "main", "ОСНОВНОЕ сканирование")
+    control = scancontrol.ScanControl()
+    _running_set(target_id, "main", "ОСНОВНОЕ сканирование", control=control)
     try:
-        scanner.run_main_scan(target_id)
+        scanner.run_main_scan(target_id, control=control)
     except Exception as e:  # noqa: BLE001
         app.logger.error("main scan failed: %s", e)
     finally:
@@ -405,17 +420,23 @@ def _run_stats(run):
 
 
 def _subdomain_summary(target_id):
-    """Сводка по поддоменам объекта (треб. 5): всего, новые,
-    исчезнувшие, конфликты IP."""
+    """Сводка по поддоменам объекта: всего, новые,
+    исчезнувшие.
+
+    v1.6.1 (правка 3): конфликты IP теперь разрешаются
+    автоматически (одна пара домен–IP в таблице один раз),
+    поэтому вместо «конфликтов» считаем число автоматически
+    разрешённых записей (auto_resolved).
+    """
     subs = db.list_subdomains(target_id)
-    conflicts = db.subdomain_conflicts(target_id)
     present = [s for s in subs if s.get("present")]
     gone = [s for s in subs if not s.get("present")]
+    auto_resolved = [s for s in subs if s.get("auto_resolved")]
     return {
         "total": len(subs),
         "present": len(present),
         "gone": len(gone),
-        "conflicts": len(conflicts),
+        "auto_resolved": len(auto_resolved),
     }
 
 
@@ -435,6 +456,10 @@ def current():
     for tid, st in active.items():
         st = dict(st)
         st["target"] = tmap.get(tid)
+        # v1.6.1 (правка 1): состояние скана (running/paused/cancelling)
+        # для кнопок управления. Объект control не передаём в шаблон.
+        ctrl = st.pop("control", None)
+        st["state"] = ctrl.state() if ctrl is not None else scancontrol.STATE_RUNNING
         active_list.append(st)
     active_list.sort(key=lambda s: s.get("started_at") or "")
 
@@ -475,14 +500,63 @@ def current_status():
     tmap = {t["id"]: t for t in db.list_targets()}
     out = []
     for tid, st in active.items():
+        ctrl = st.get("control")
         out.append({
             "target_id": tid,
             "target_name": (tmap.get(tid) or {}).get("name", f"#{tid}"),
             "scan_class": st.get("scan_class"),
             "label": st.get("label"),
             "started_at": st.get("started_at"),
+            # v1.6.1 (правка 1): текущее состояние для кнопок управления.
+            "state": ctrl.state() if ctrl is not None else scancontrol.STATE_RUNNING,
         })
     return jsonify({"running": out, "count": len(out)})
+
+
+# --- v1.6.1 (правка 1): управление активным сканом ---
+
+@app.route("/current/<int:target_id>/pause", methods=["POST"])
+@login_required
+def current_pause(target_id):
+    """Приостановить активный скан объекта (правка 1)."""
+    ctrl = _running_control(target_id)
+    if ctrl is None:
+        return _control_response(target_id, ok=False, msg="Скан не активен.")
+    ctrl.request_pause()
+    return _control_response(target_id, ok=True, msg="Сканирование приостановлено.")
+
+
+@app.route("/current/<int:target_id>/resume", methods=["POST"])
+@login_required
+def current_resume(target_id):
+    """Возобновить приостановленный скан (правка 1)."""
+    ctrl = _running_control(target_id)
+    if ctrl is None:
+        return _control_response(target_id, ok=False, msg="Скан не активен.")
+    ctrl.request_resume()
+    return _control_response(target_id, ok=True, msg="Сканирование возобновлено.")
+
+
+@app.route("/current/<int:target_id>/cancel", methods=["POST"])
+@login_required
+def current_cancel(target_id):
+    """Отменить активный скан объекта (правка 1)."""
+    ctrl = _running_control(target_id)
+    if ctrl is None:
+        return _control_response(target_id, ok=False, msg="Скан не активен.")
+    ctrl.request_cancel()
+    return _control_response(target_id, ok=True, msg="Сканирование отменяется…")
+
+
+def _control_response(target_id, ok, msg):
+    """Ответ на управляющий запрос: JSON для AJAX, иначе redirect."""
+    wants_json = request.headers.get("X-Requested-With") == "XMLHttpRequest"
+    if wants_json:
+        ctrl = _running_control(target_id)
+        state = ctrl.state() if ctrl is not None else None
+        return jsonify({"ok": ok, "message": msg, "state": state})
+    flash(msg, "ok" if ok else "error")
+    return redirect(url_for("current"))
 
 
 @app.route("/history")
@@ -653,12 +727,19 @@ def subdomains_window(target_id):
     if not target:
         abort(404)
     subs = db.list_subdomains(target_id)
-    conflicts = db.subdomain_conflicts(target_id)
+    # v1.6.1 (правка 3): конфликты разрешаются автоматически после
+    # каждого скана. Подготавливаем сводную информацию по утилитам
+    # и разрешённым конфликтам для столбца «Информация».
     for s in subs:
-        s["conflict"] = s.get("subdomain") in conflicts
+        tools = [t.strip() for t in (s.get("tools") or s.get("tool") or "").split(",")
+                 if t.strip()]
+        s["tools_list"] = tools
+        alt = [ip.strip() for ip in (s.get("alt_ips") or "").split(",")
+               if ip.strip()]
+        s["alt_ips_list"] = alt
     summary = _subdomain_summary(target_id)
     return render_template("subdomains.html", target=target, subs=subs,
-                           conflicts=conflicts, summary=summary)
+                           summary=summary)
 
 
 @app.route("/subdomains/<int:target_id>/bind", methods=["POST"])

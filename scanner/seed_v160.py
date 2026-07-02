@@ -54,6 +54,8 @@ if len(runs) >= 2:
                      tool="dnsrecon", last_run_id=r_new)
     # Отметим present=1 для поддоменов нового запуска, остальные — исчезнувшие.
     db.mark_subdomains_run(1, r_new)
-    print("seed v1.6.0 done: run_new=%s run_old=%s" % (r_new, r_old))
+    # Автоматически разрешаем конфликты IP (как это делает реальный скан).
+    n_res = db.auto_resolve_subdomains(1)
+    print("seed v1.6.0 done: run_new=%s run_old=%s auto_resolved=%s" % (r_new, r_old, n_res))
 else:
     print("НЕ ХВАТАЕТ main-запусков для сидирования")

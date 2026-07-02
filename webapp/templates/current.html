@@ -14,11 +14,11 @@
       здесь появятся результаты последнего основного скана.</p>
     <table class="tbl">
       <thead>
-        <tr><th>Объект</th><th>CIDR</th><th>Класс</th><th>Параметры</th><th>Запущено</th><th>Статус</th></tr>
+        <tr><th>Объект</th><th>CIDR</th><th>Класс</th><th>Параметры</th><th>Запущено</th><th>Статус</th><th>Управление</th></tr>
       </thead>
       <tbody id="active-body">
       {% for a in active_list %}
-        <tr>
+        <tr data-target="{{ a.target_id }}">
           <td><strong>{{ a.target.name if a.target else '#' ~ a.target_id }}</strong></td>
           <td><code>{{ a.target.cidr if a.target else '—' }}</code></td>
           <td>
@@ -27,7 +27,26 @@
           </td>
           <td class="muted small">{{ a.label or '—' }}</td>
           <td class="nowrap">{{ a.started_at|fmtdate }}</td>
-          <td><span class="badge running">выполняется <span class="spinner"></span></span></td>
+          <td class="scan-state">
+            {% if a.state == 'paused' %}
+              <span class="badge paused">приостановлено</span>
+            {% elif a.state == 'cancelling' %}
+              <span class="badge cancelling">отменяется <span class="spinner"></span></span>
+            {% else %}
+              <span class="badge running">выполняется <span class="spinner"></span></span>
+            {% endif %}
+          </td>
+          <td class="scan-controls nowrap">
+            <button type="button" class="btn btn-sm ctl-pause"
+                    data-target="{{ a.target_id }}"
+                    {% if a.state != 'running' %}style="display:none"{% endif %}>‖ Пауза</button>
+            <button type="button" class="btn btn-sm ctl-resume"
+                    data-target="{{ a.target_id }}"
+                    {% if a.state != 'paused' %}style="display:none"{% endif %}>▶ Продолжить</button>
+            <button type="button" class="btn btn-sm btn-danger ctl-cancel"
+                    data-target="{{ a.target_id }}"
+                    {% if a.state == 'cancelling' %}disabled{% endif %}>✕ Отменить</button>
+          </td>
         </tr>
       {% endfor %}
       </tbody>
@@ -130,21 +149,75 @@
 
 {% block scripts %}
 <script>
-// Треб. 4: автоопрос статуса активных сканов. Если число активных изменилось
-// (скан начался/завершился) — перезагружаем страницу для актуальных данных.
+// Треб. 4 + v1.6.1 (правка 1): автоопрос статуса активных сканов и
+// управление паузой/отменой.
 (function () {
   var initial = {{ active_list|length }};
+  var CSRF = null;
+
+  // Применить состояние к строке скана (без перезагрузки).
+  function applyState(tid, state) {
+    var row = document.querySelector('tr[data-target="' + tid + '"]');
+    if (!row) return;
+    var stateCell = row.querySelector('.scan-state');
+    var pause = row.querySelector('.ctl-pause');
+    var resume = row.querySelector('.ctl-resume');
+    var cancel = row.querySelector('.ctl-cancel');
+    if (stateCell) {
+      if (state === 'paused') {
+        stateCell.innerHTML = '<span class="badge paused">приостановлено</span>';
+      } else if (state === 'cancelling') {
+        stateCell.innerHTML = '<span class="badge cancelling">отменяется <span class="spinner"></span></span>';
+      } else {
+        stateCell.innerHTML = '<span class="badge running">выполняется <span class="spinner"></span></span>';
+      }
+    }
+    if (pause) pause.style.display = (state === 'running') ? '' : 'none';
+    if (resume) resume.style.display = (state === 'paused') ? '' : 'none';
+    if (cancel) cancel.disabled = (state === 'cancelling');
+  }
+
+  function control(tid, action) {
+    return fetch('/current/' + tid + '/' + action, {
+      method: 'POST',
+      headers: { 'X-Requested-With': 'XMLHttpRequest' }
+    }).then(function (r) { return r.json(); })
+      .then(function (j) {
+        if (j && j.state) { applyState(tid, j.state); }
+        else { window.location.reload(); }
+      })
+      .catch(function () { window.location.reload(); });
+  }
+
+  document.addEventListener('click', function (e) {
+    var b = e.target.closest ? e.target.closest('button') : null;
+    if (!b) return;
+    var tid = b.getAttribute('data-target');
+    if (!tid) return;
+    if (b.classList.contains('ctl-pause')) { control(tid, 'pause'); }
+    else if (b.classList.contains('ctl-resume')) { control(tid, 'resume'); }
+    else if (b.classList.contains('ctl-cancel')) {
+      if (window.confirm('Отменить текущее сканирование? Уже собранные данные сохранятся.')) {
+        control(tid, 'cancel');
+      }
+    }
+  });
+
   function poll() {
     fetch("{{ url_for('current_status') }}")
       .then(function (r) { return r.json(); })
       .then(function (j) {
         if (j.count !== initial) {
           window.location.reload();
+          return;
         }
+        // Обновляем состояния без перезагрузки (пауза/отмена).
+        (j.running || []).forEach(function (s) {
+          applyState(String(s.target_id), s.state);
+        });
       })
       .catch(function () { /* тихо игнорируем сетевые сбои */ });
   }
-  // Опрашиваем каждые 5 с только при наличии активных или для отслеживания старта.
   setInterval(poll, 5000);
 })();
 </script>

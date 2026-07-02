@@ -402,3 +402,27 @@ a.sum-link:hover{border-color:var(--accent2);background:#0b2a3a}
 .compare-tbl{table-layout:fixed;width:100%}
 .compare-tbl th:first-child,.compare-tbl td:first-child{width:180px}
 .compare-tbl th:not(:first-child),.compare-tbl td:not(:first-child){width:auto}
+
+/* ============ v1.6.1 (правка 1): управление активным сканом ============ */
+/* Кнопки управления в таблице «Текущее сканирование». */
+.btn-sm{padding:3px 9px;font-size:11px;margin-right:5px}
+.btn-danger{background:transparent;color:var(--danger);border-color:#5b2630}
+.btn-danger:hover{background:#3a1a1f;border-color:var(--danger)}
+.btn-danger:disabled{opacity:.5;cursor:not-allowed}
+.scan-controls{white-space:nowrap}
+/* Состояние скана: приостановлено / отменяется. */
+.badge.paused{background:#0b2a3a;color:#7dd3fc}
+.badge.cancelling{background:#3a1a1f;color:#f3a0a8}
+/* Статус запуска «отменено» в истории. */
+.badge.cancelled{background:#2a2530;color:#c4b5e0}
+
+/* ============ v1.6.1 (правка 3/5): поддомены ============ */
+/* Чип сводки «разрешено конфликтов IP». */
+.sum-chip.sum-auto{background:#0b2a3a;border-color:#14405a;color:#7dd3fc}
+/* Метка авто-resolve и столбец «Информация». */
+.badge.auto-res{background:#0b2a3a;color:#7dd3fc}
+.sub-info .info-inline{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.sub-info .info-drop{margin-top:4px}
+.sub-info .info-block{margin:6px 0}
+.sub-info .tool-chips{display:flex;gap:4px;flex-wrap:wrap;margin-top:3px}
+.sub-info .opt-label{font-size:12px;color:var(--muted);font-weight:600}

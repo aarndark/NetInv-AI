@@ -264,6 +264,12 @@ CREATE TABLE IF NOT EXISTS discovered_subdomains (
     last_tool   TEXT,                        -- утилита последнего обнаружения
     tools       TEXT,                        -- все утилиты, обнаружившие (через запятую)
     resolved_ip TEXT,                        -- IP после разрешения конфликта (resolve)
+    -- v1.6.1 (правка 3): конфликты IP разрешаются АВТОМАТИЧЕСКИ, поэтому
+    -- каждый поддомен присутствует в таблице ОДИН раз. alt_ips — прочие IP,
+    -- отброшенные при авторазрешении (для сводки в столбце «Информация»);
+    -- auto_resolved=1, если текущий IP выбран автоматически из конфликта.
+    alt_ips     TEXT,                        -- альтернативные IP (через запятую)
+    auto_resolved INTEGER NOT NULL DEFAULT 0,
     -- bound: поддомен привязан к объекту как подтверждённая цель (0/1).
     bound       INTEGER NOT NULL DEFAULT 0,
     -- present: обнаружен в ПОСЛЕДНЕМ скане (0/1) — для подсветки новых/исчезших.
@@ -397,7 +403,13 @@ def _migrate(c):
                          ("last_seen", "TEXT"), ("last_tool", "TEXT"),
                          ("tools", "TEXT"), ("resolved_ip", "TEXT"),
                          ("bound", "INTEGER NOT NULL DEFAULT 0"),
-                         ("present", "INTEGER NOT NULL DEFAULT 1")):
+                         ("present", "INTEGER NOT NULL DEFAULT 1"),
+                         # v1.6.1 (правка 3): автоматическое разрешение конфликтов.
+                         # alt_ips  — альтернативные IP, отброшенные при авторазрешении
+                         #            (через запятую), для сводки в столбце «Информация».
+                         # auto_resolved — 1, если IP выбран автоматически из конфликта.
+                         ("alt_ips", "TEXT"),
+                         ("auto_resolved", "INTEGER NOT NULL DEFAULT 0")):
             if col not in scols:
                 c.execute(f"ALTER TABLE discovered_subdomains ADD COLUMN {col} {ddl}")
 
@@ -723,6 +735,91 @@ def resolve_subdomain_ip(target_id, subdomain, resolved_ip, tool="resolve"):
              keep.get("first_tool"), now, tool, ",".join(tools), resolved_ip,
              int(keep.get("bound") or 0), 1))
         c.commit()
+
+
+def auto_resolve_subdomains(target_id):
+    """v1.6.1 (правка 3): АВТОМАТИЧЕСКОЕ разрешение конфликтов IP.
+
+    Раньше при разных IP от разных утилит (dnsmap vs dnsrecon) в таблице
+    оставалось НЕСКОЛЬКО строк одного FQDN, а оператору предлагался
+    ручной resolve. Теперь каждая пара домен–IP присутствует ОДИН раз:
+    для каждого FQDN автоматически выбирается ОДИН актуальный IP — наиболее
+    свежий (по last_seen), при равенстве — подтверждённый большим
+    числом утилит. Остальные IP сохраняются в alt_ips (для сводки
+    в столбце «Информация»), все утилиты агрегируются в tools.
+    Возвращает число разрешённых конфликтов.
+    """
+    resolved = 0
+    with _LOCK, connect() as c:
+        # Собираем FQDN, у которых больше одной строки (независимо от IP).
+        names = [r["subdomain"] for r in c.execute(
+            "SELECT subdomain, COUNT(*) AS n FROM discovered_subdomains "
+            "WHERE target_id=? GROUP BY subdomain HAVING n > 1",
+            (target_id,)).fetchall()]
+        for name in names:
+            rows = [dict(r) for r in c.execute(
+                "SELECT * FROM discovered_subdomains "
+                "WHERE target_id=? AND subdomain=?", (target_id, name))]
+            if len(rows) < 2:
+                continue
+            # Агрегация утилит и времён.
+            tools = []
+            for r in rows:
+                for t in (r.get("tools") or r.get("tool") or "").split(","):
+                    t = t.strip()
+                    if t and t not in tools:
+                        tools.append(t)
+            first_seen = min((r.get("first_seen") or r.get("found_at") or "")
+                             for r in rows)
+            last_seen = max((r.get("last_seen") or r.get("found_at") or "")
+                            for r in rows)
+            # Если оператор уже выбрал IP вручную (resolved_ip) — уважаем его.
+            manual_ip = next((r.get("resolved_ip") for r in rows
+                              if r.get("resolved_ip")), None)
+            # Кандидаты IP с метаданными для выбора актуального.
+            ip_rows = [r for r in rows if r.get("ip")]
+            all_ips = []
+            for r in ip_rows:
+                if r["ip"] not in all_ips:
+                    all_ips.append(r["ip"])
+            if manual_ip:
+                chosen = manual_ip
+            elif ip_rows:
+                # Сортировка: свежее last_seen → больше утилит → IP асц.
+                def _key(r):
+                    ntools = len([t for t in (r.get("tools") or "").split(",") if t])
+                    return (r.get("last_seen") or r.get("found_at") or "",
+                            ntools, r.get("ip") or "")
+                chosen = sorted(ip_rows, key=_key, reverse=True)[0]["ip"]
+            else:
+                chosen = None
+            alt = [ip for ip in all_ips if ip != chosen]
+            keep = rows[0]
+            was_conflict = len(all_ips) > 1 or bool(manual_ip and alt)
+            # Схлопываем все строки FQDN в одну.
+            bound = 1 if any(int(r.get("bound") or 0) for r in rows) else 0
+            present = 1 if any(int(r.get("present") or 0) for r in rows) else 0
+            last_run_id = next((r.get("last_run_id") for r in rows
+                                if r.get("last_run_id")), keep.get("last_run_id"))
+            c.execute("DELETE FROM discovered_subdomains "
+                      "WHERE target_id=? AND subdomain=?", (target_id, name))
+            c.execute(
+                "INSERT INTO discovered_subdomains(target_id, parent, subdomain, "
+                "ip, tool, last_run_id, found_at, first_seen, first_tool, "
+                "last_seen, last_tool, tools, resolved_ip, alt_ips, "
+                "auto_resolved, bound, present) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (target_id, keep.get("parent"), name, chosen,
+                 keep.get("tool"), last_run_id, keep.get("found_at") or first_seen,
+                 first_seen, keep.get("first_tool"), last_seen,
+                 keep.get("last_tool"), ",".join(tools),
+                 manual_ip, ",".join(alt),
+                 1 if (was_conflict and not manual_ip) else 0,
+                 bound, present))
+            if was_conflict:
+                resolved += 1
+        c.commit()
+    return resolved
 
 
 def mark_subdomains_run(target_id, run_id, since=None):

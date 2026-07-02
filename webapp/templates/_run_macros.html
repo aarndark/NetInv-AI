@@ -66,19 +66,6 @@
     {% else %}
       <span class="err-count" title="Всего записей об ошибках/деградации">⚠ {{ total.n }}</span>
     {% endif %}
-    {# Пояснение о graceful degradation — в начале, всегда. #}
-    <details class="err-drop err-intro">
-      <summary>о деградации</summary>
-      <div class="err-body">
-        <p class="muted small">
-          Все модули безопасности <strong>опциональны</strong> и работают в режиме
-          graceful degradation: если инструмент не установлен или недоступен —
-          скан продолжается, а модуль пропускается с предупреждением.
-          Недоступность самих хостов сети <strong>ошибкой не считается</strong>
-          и здесь не отображается.
-        </p>
-      </div>
-    </details>
     {% for mod, items in errmap.items() %}
       <details class="err-drop">
         <summary>
@@ -109,7 +96,7 @@
   <div class="run-stats">
     <span class="sum-chip">узлов: <strong>{{ s.total }}</strong></span>
     <span class="sum-chip sum-live">живые: <strong>{{ s.live }}</strong></span>
-    <span class="sum-chip sum-palo">Palo Alto: <strong>{{ s.palo }}</strong></span>
+    <span class="sum-chip sum-palo">артефакты: <strong>{{ s.palo }}</strong></span>
     <span class="sum-chip">откр. портов: <strong>{{ s.open_ports }}</strong></span>
     <a class="sum-chip sum-link" href="{{ url_for('subdomains_window', target_id=run.target_id) }}"
        title="Открыть окно поддоменов объекта">поддомены: <strong>{{ s.subdomains }}</strong></a>
@@ -155,7 +142,7 @@
           {% if r.scan_class == 'main' %}<span class="badge cls-main">основное</span>
           {% else %}<span class="badge cls-adv">расширенное</span>{% endif %}
         </td>
-        <td><span class="badge {{ r.status }}">{{ r.status }}</span></td>
+        <td><span class="badge {{ r.status }}">{%- if r.status == 'done' -%}готово{%- elif r.status == 'running' -%}выполняется{%- elif r.status == 'error' -%}ошибка{%- elif r.status == 'cancelled' -%}отменено{%- else -%}{{ r.status }}{%- endif -%}</span></td>
         <td>{{ run_stats(r) }}</td>
         <td>{{ options_cell(r) }}</td>
         <td>{{ errors_cell(r) }}</td>

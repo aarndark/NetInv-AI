@@ -20,14 +20,16 @@
     <span class="sum-chip">Всего: <strong>{{ summary.total }}</strong></span>
     <span class="sum-chip sum-live">актуальные: <strong>{{ summary.present }}</strong></span>
     <span class="sum-chip sum-palo">исчезнувшие: <strong>{{ summary.gone }}</strong></span>
-    {% if summary.conflicts %}<span class="sum-chip sum-crit">конфликты IP: <strong>{{ summary.conflicts }}</strong></span>{% endif %}
+    {% if summary.auto_resolved %}<span class="sum-chip sum-auto">разрешено конфликтов IP: <strong>{{ summary.auto_resolved }}</strong></span>{% endif %}
   </div>
 
   <p class="muted small">
     FQDN отсортированы «по уровням» (как в списке доменов). Новые обнаруженные
     поддомены с IP можно <strong>привязать</strong> к объекту (все сразу или по
     одному), исчезнувшие — <strong>отвязать</strong>. Конфликты IP (например,
-    dnsmap vs dnsrecon) требуют разрешения (resolve). Массовые операции
+    dnsmap vs dnsrecon) разрешаются <strong>автоматически</strong>: для каждого
+    FQDN выбирается один актуальный IP, а сводка по всем использованным утилитам
+    и разрешённым конфликтам показана в столбце «Информация». Массовые операции
     выполняются с подтверждением.
   </p>
 
@@ -57,56 +59,80 @@
         <th>Родительский домен</th>
         <th>FQDN / поддомен</th>
         <th>IP-адрес</th>
-        <th>Первое обнаружение<br><span class="hint">дата · утилита</span></th>
-        <th>Последнее обнаружение<br><span class="hint">дата · утилита</span></th>
+        <th>Первое обнаружение</th>
+        <th>Последнее обнаружение</th>
+        <th>Информация</th>
         <th>Статус</th>
         <th>Действия</th>
       </tr>
     </thead>
     <tbody>
     {% for s in subs %}
-      {# Подсветка строк: новые (present), исчезнувшие (not present), конфликт. #}
-      <tr class="{% if s.conflict %}row-conflict{% elif s.present %}row-new{% else %}row-gone{% endif %}">
+      {# Подсветка строк: актуальные (present) / исчезнувшие (not present). #}
+      <tr class="{% if s.present %}row-new{% else %}row-gone{% endif %}">
         <td><code>{{ s.parent }}</code></td>
         <td><code>{{ s.subdomain }}</code></td>
         <td>
           {% if s.resolved_ip %}
-            <span class="ip-resolved" title="IP подтверждён через resolve">{{ s.resolved_ip }}</span>
+            <span class="ip-resolved" title="IP подтверждён оператором вручную">{{ s.resolved_ip }}</span>
           {% elif s.ip %}
             {{ s.ip }}
           {% else %}<span class="muted">—</span>{% endif %}
-          {% if s.conflict %}<span class="conflict-tag" title="Разные IP от разных утилит">⚠ конфликт</span>{% endif %}
         </td>
-        <td class="nowrap">
-          {{ s.first_seen|fmtdate if s.first_seen else (s.found_at|fmtdate) }}
-          {% if s.first_tool %}<span class="badge">{{ s.first_tool }}</span>{% elif s.tool %}<span class="badge">{{ s.tool }}</span>{% endif %}
-        </td>
-        <td class="nowrap">
-          {{ s.last_seen|fmtdate if s.last_seen else (s.found_at|fmtdate) }}
-          {% if s.last_tool %}<span class="badge">{{ s.last_tool }}</span>{% elif s.tool %}<span class="badge">{{ s.tool }}</span>{% endif %}
+        {# Правка 5: только дата, без утилит. #}
+        <td class="nowrap">{{ s.first_seen|fmtdate if s.first_seen else (s.found_at|fmtdate) }}</td>
+        <td class="nowrap">{{ s.last_seen|fmtdate if s.last_seen else (s.found_at|fmtdate) }}</td>
+        {# Правка 5: столбец «Информация» — сводка утилит и разрешённых конфликтов. #}
+        <td class="sub-info">
+          <div class="info-inline">
+            {% if s.tools_list %}
+              <span class="muted small" title="Утилиты, обнаружившие поддомен">утилит: {{ s.tools_list|length }}</span>
+            {% else %}
+              <span class="muted small">—</span>
+            {% endif %}
+            {% if s.auto_resolved %}
+              <span class="badge auto-res" title="Конфликт IP разрешён автоматически">авто-resolve</span>
+            {% endif %}
+          </div>
+          {% if s.tools_list or s.alt_ips_list %}
+          <details class="opt-drop info-drop">
+            <summary>подробнее</summary>
+            <div class="opt-body">
+              {% if s.tools_list %}
+              <div class="info-block">
+                <span class="opt-label">Использованные утилиты:</span>
+                <div class="tool-chips">
+                  {% for t in s.tools_list %}<span class="badge">{{ t }}</span>{% endfor %}
+                </div>
+              </div>
+              {% endif %}
+              {% if s.auto_resolved and s.alt_ips_list %}
+              <div class="info-block">
+                <span class="opt-label">Разрешённый конфликт IP:</span>
+                <div class="muted small">
+                  выбран <strong>{{ s.ip or '—' }}</strong>;
+                  отброшены: {% for a in s.alt_ips_list %}<code>{{ a }}</code>{% if not loop.last %}, {% endif %}{% endfor %}
+                </div>
+              </div>
+              {% elif s.resolved_ip and s.alt_ips_list %}
+              <div class="info-block">
+                <span class="opt-label">Конфликт IP (разрешён вручную):</span>
+                <div class="muted small">
+                  выбран <strong>{{ s.resolved_ip }}</strong>;
+                  отброшены: {% for a in s.alt_ips_list %}<code>{{ a }}</code>{% if not loop.last %}, {% endif %}{% endfor %}
+                </div>
+              </div>
+              {% endif %}
+            </div>
+          </details>
+          {% endif %}
         </td>
         <td>
-          {% if s.conflict %}<span class="st-badge st-conflict">конфликт IP</span>
-          {% elif s.present %}<span class="st-badge st-present">актуальный</span>
+          {% if s.present %}<span class="st-badge st-present">актуальный</span>
           {% else %}<span class="st-badge st-gone">исчезнувший</span>{% endif %}
           {% if s.bound %}<span class="st-badge st-bound">привязан</span>{% endif %}
         </td>
         <td class="sub-actions">
-          {# Разрешение конфликта IP (resolve). #}
-          {% if s.conflict %}
-          <details class="opt-drop">
-            <summary>resolve</summary>
-            <div class="opt-body">
-              <form method="post" action="{{ url_for('subdomains_resolve', target_id=target.id) }}"
-                    class="inline-scan">
-                <input type="hidden" name="subdomain" value="{{ s.subdomain }}">
-                <input type="text" name="resolved_ip" size="15" placeholder="верный IP"
-                       value="{{ s.resolved_ip or s.ip or '' }}" required>
-                <button type="submit" class="btn primary">Разрешить</button>
-              </form>
-            </div>
-          </details>
-          {% endif %}
           {# Привязать / отвязать по одному. #}
           {% if s.bound %}
           <form method="post" action="{{ url_for('subdomains_bind', target_id=target.id) }}"
@@ -134,8 +160,8 @@
 
   <p class="legend">
     <span class="row-legend row-new">актуальный</span> — обнаружен в последнем скане;
-    <span class="row-legend row-gone">исчезнувший</span> — был ранее, сейчас не найден;
-    <span class="row-legend row-conflict">конфликт</span> — разные IP от разных утилит (нужен resolve).
+    <span class="row-legend row-gone">исчезнувший</span> — был ранее, сейчас не найден.
+    Конфликты IP разрешаются автоматически; сводка — в столбце «Информация».
   </p>
   {% endif %}
 </section>
