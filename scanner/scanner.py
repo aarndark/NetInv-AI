@@ -560,6 +560,11 @@ def _finalize_cancelled(run_id, slog, log, target_id, scan_class):
         log("[!] Сканирование отменено оператором.")
     except Exception:  # noqa: BLE001
         pass
+    # v1.6.2: завершаем фазу CVE — гасим VPN (если поднимался).
+    try:
+        cve_lookup.osv_teardown(log=log)
+    except Exception:  # noqa: BLE001
+        pass
     try:
         db.finish_run(run_id, "cancelled", finished, 0,
                       "Сканирование отменено оператором.")
@@ -823,6 +828,7 @@ def run_scan(target_id, profile="stealth", ports=None, top_ports=DEFAULT_TOP_POR
         db.finish_run(run_id, "done", dt.datetime.now().isoformat(timespec="seconds"),
                       0, "dry-run")
         diff_engine.update_host_states(target_id, run_id, scan_class=scan_class)
+        cve_lookup.osv_teardown(log=log)   # v1.6.2: гасим VPN фазы CVE
         slog.close()
         return run_id
 
@@ -830,6 +836,7 @@ def run_scan(target_id, profile="stealth", ports=None, top_ports=DEFAULT_TOP_POR
         db.finish_run(run_id, "error",
                       dt.datetime.now().isoformat(timespec="seconds"), 0,
                       "nmap не установлен")
+        cve_lookup.osv_teardown(log=log)   # v1.6.2: гасим VPN фазы CVE
         slog.close()
         raise SystemExit("nmap отсутствует")
 
@@ -854,6 +861,7 @@ def run_scan(target_id, profile="stealth", ports=None, top_ports=DEFAULT_TOP_POR
     except Exception as e:  # noqa: BLE001
         db.finish_run(run_id, "error",
                       dt.datetime.now().isoformat(timespec="seconds"), 0, str(e))
+        cve_lookup.osv_teardown(log=log)   # v1.6.2: гасим VPN фазы CVE
         slog.close()
         raise
 
@@ -1019,6 +1027,7 @@ def run_scan(target_id, profile="stealth", ports=None, top_ports=DEFAULT_TOP_POR
         f"✓ Сканирование объекта «{target['name']}» (запуск #{run_id}, {scan_class}) завершено: "
         f"узлов up {hosts_up}; уязвимостей — крит. {vc.get('crit', 0)}, "
         f"предупр. {vc.get('warn', 0)}, инфо {vc.get('info', 0)}")
+    cve_lookup.osv_teardown(log=log)   # v1.6.2: завершаем фазу CVE — гасим VPN
     slog.close()
     return run_id
 

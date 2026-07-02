@@ -40,6 +40,84 @@
 
 ---
 
+## Новое в версии 1.6.2
+
+Восстановлен онлайн-поиск CVE через OSV (api.osv.dev). По результатам
+диагностики выявлены и устранены три причины сбоев.
+
+### 1. Онлайн-CVE через AdGuard VPN — только на фазу CVE
+
+Из сети объекта прямой выход к `api.osv.dev` заблокирован (таймаут соединения
+и по IPv4, и по IPv6). Доступ появляется только через VPN. Поэтому сканер
+**поднимает AdGuard VPN один раз в начале блока онлайн-CVE и гасит его сразу
+после** — так основное сканирование подсети (nmap `-sT`) идёт по штатному
+маршруту без VPN, а к OSV мы ходим через туннель.
+
+- Механизм: `adguardvpn-cli connect -l <локация>` / `disconnect` (по умолчанию
+  через `sudo -n`, если скан запущен не от root).
+- Локация по умолчанию — **Helsinki**. VPN поднимается один раз на весь
+  проход CVE (reference counting: параллельные сканы из Flask переиспользуют
+  один туннель), отключается по завершении последнего.
+- **Graceful degradation**: если `adguardvpn-cli` не установлен, нет прав
+  `sudo` (не настроен NOPASSWD) или туннель не поднялся — онлайн-CVE
+  пропускаются, продолжает работать offline-таблица. Скан не падает.
+- VPN гасится в `finally` скана при любом исходе (успех/ошибка/отмена/пауза).
+
+**Переменные окружения:**
+
+| Переменная | По умолчанию | Назначение |
+|------------|--------------|------------|
+| `NETINV_OSV_VPN` | `1` | Включить авто-VPN на фазу CVE (`0` — выключить) |
+| `NETINV_OSV_VPN_LOCATION` | `Helsinki` | Локация выхода AdGuard VPN |
+| `NETINV_OSV_VPN_BIN` | `adguardvpn-cli` | Путь к бинарю CLI |
+| `NETINV_OSV_VPN_SUDO` | `1` | Запускать CLI через `sudo -n` (`0` — без sudo) |
+| `NETINV_HTTPS_PROXY` | — | Если задан — VPN **не** используется, маршрут к OSV обеспечивает оператор (прокси) |
+
+> Настройте `NOPASSWD` для `adguardvpn-cli` в `sudoers` (или запускайте от
+> root), иначе поднять VPN в фоне скана не выйдет — сработает деградация.
+
+### 2. Маппинг баннеров nmap → пакет OSV (name + ecosystem)
+
+OSV `/v1/query` требует при идентификации по имени **одновременно**
+`package.name` И `package.ecosystem`. Баннеры nmap («Apache httpd»,
+«Golang net/http server» и т.п.) — это не имена пакетов OSV. Добавлена
+таблица сопоставления: продукт → (`name`, `ecosystem`). Примеры:
+
+| Баннер nmap | OSV name | OSV ecosystem |
+|-------------|----------|---------------|
+| Apache httpd / apache2 | `apache` | OSS-Fuzz |
+| nginx | `nginx` | OSS-Fuzz |
+| OpenSSH / ssh | `openssh` | OSS-Fuzz |
+| OpenSSL | `openssl` | OSS-Fuzz |
+| curl | `curl` | OSS-Fuzz |
+| SQLite | `sqlite3` | OSS-Fuzz |
+| PostgreSQL | `postgresql` | OSS-Fuzz |
+| Golang net/http | `stdlib` | Go |
+| Python | `cpython` | OSS-Fuzz |
+
+### 3. Больше никаких HTTP 400 «Invalid query»
+
+Заведомо некорректные запросы **не отправляются**:
+
+- продукт не сопоставлен с экосистемой OSV → онлайн-запрос пропускается
+  (используется offline-таблица);
+- продукт сопоставлен, но нет версии (для этих пакетов версия обязательна) →
+  запрос без версии не шлётся.
+
+Корректный запрос формируется как `{"package": {"name": ..., "ecosystem": ...},
+"version": ...}`. Это устранило поток ошибок HTTP 400 в логе.
+
+> Проверить доступность OSV вручную из CLI:
+> `adguardvpn-cli connect -l Helsinki` →
+> `curl -sS -X POST https://api.osv.dev/v1/query -d '{"version":"1.21.0","package":{"name":"stdlib","ecosystem":"Go"}}'`
+> → `adguardvpn-cli disconnect`.
+
+Покрытие тестами — `scanner/test_osv_v162.py` (маппинг, отсечка битых
+запросов без обращения к сети, форма payload, graceful degradation без VPN,
+идемпотентность teardown).
+
+---
+
 ## Новое в версии 1.6.1
 
 Точечные правки web-интерфейса по итогам эксплуатации: управление активным

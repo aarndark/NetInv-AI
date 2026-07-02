@@ -30,6 +30,11 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+try:
+    import vpnctl                     # управление AdGuard VPN для фазы CVE (v1.6.2)
+except ImportError:                   # запуск как пакета scanner.*
+    from . import vpnctl
+
 # Каталог кеша онлайн-ответов (CVE по продукту+версии).
 _CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                           "..", "data", "cve_cache")
@@ -88,6 +93,18 @@ def osv_healthcheck(log=None, force=False):
         if log:
             log("[cve] " + m)
 
+    # v1.6.2: НАЧАЛО ФАЗЫ CVE — поднимаем AdGuard VPN на весь блок онлайн-CVE
+    # (по согласованию с пользователем). Прямой egress к api.osv.dev из сети
+    # объекта заблокирован; доступ появляется только через VPN. VPN гасится в
+    # cve_lookup.osv_teardown() в finally скана. Если VPN не поднялся —
+    # graceful degradation: онлайн-CVE пропускаются, offline-таблица работает.
+    vpn_ok = vpnctl.begin_cve_phase(log=log)
+    if not vpn_ok:
+        _OSV_REACHABLE = False
+        _log("Онлайн-CVE недоступны (VPN не поднят / не настроен). "
+             "Работает offline-таблица (graceful).")
+        return _OSV_REACHABLE
+
     proxy = _osv_proxy()
     proxy_note = f" через прокси {proxy}" if proxy else ""
     # Лёгкий GET к корню API (дешёвле и не требует валидного payload).
@@ -109,9 +126,25 @@ def osv_healthcheck(log=None, force=False):
         _log(f"OSV НЕДОСТУПЕН{proxy_note}: {e}")
         _log("Причина: нет прямого выхода в Интернет (геоблокировки / firewall / "
              "корпоративный периметр). Онлайн-CVE пропускаются, работает offline-таблица.")
-        _log("Решение: поднимите VPN либо задайте прокси: "
-             "export NETINV_HTTPS_PROXY=http://HOST:PORT  (см. README, раздел «Новое в 1.5.0»).")
+        _log("Решение: проверьте AdGuard VPN (adguardvpn-cli status) либо задайте прокси: "
+             "export NETINV_HTTPS_PROXY=http://HOST:PORT  (см. README, раздел «Новое в 1.6.2»).")
     return _OSV_REACHABLE
+
+
+def osv_teardown(log=None):
+    """Завершить фазу онлайн-CVE: отключить VPN (v1.6.2).
+
+    Вызывается в finally скана НЕЗАВИСИМО от исхода (успех/ошибка/отмена).
+    Никогда не бросает исключений. Сбрасывает кеш доступности, чтобы следующий
+    скан снова поднял VPN и перепроверил OSV.
+    """
+    global _OSV_REACHABLE
+    try:
+        vpnctl.end_cve_phase(log=log)
+    finally:
+        # Следующий скан должен заново проверить доступность (VPN будет
+        # подниматься заново), поэтому сбрасываем кеш результата healthcheck.
+        _OSV_REACHABLE = None
 
 
 # ==========================================================================
@@ -240,11 +273,68 @@ def _cvss_to_severity(score):
     return "info"
 
 
+# ==========================================================================
+# 2a) МАППИНГ баннеров nmap → OSV package.name + ecosystem (v1.6.2)
+# ==========================================================================
+# ПРОБЛЕМА (подтверждена диагностикой пользователя): OSV /v1/query ТРЕБУЕТ,
+# чтобы при идентификации по имени были заданы И name, И ecosystem. Запрос
+# только с package.name (как слал NetInv до 1.6.2) → HTTP 400 "Invalid query".
+# Кроме того, баннеры nmap («Apache httpd», «Golang net/http server»,
+# «Cisco Expressway E») — это НЕ имена пакетов в экосистемах OSV, поэтому даже
+# корректный по формату запрос не находил CVE.
+#
+# РЕШЕНИЕ: таблица сопоставления. Каждая запись —
+#   (regex по нормализованной строке "product", (osv_name, ecosystem, need_ver))
+# need_ver=True означает, что без версии запрос к OSV бессмысленен (шлём только
+# при наличии версии). Для C/C++-демонов (apache/nginx/openssh) берём
+# экосистему OSS-Fuzz — там эти проекты интегрированы. Для стандартной
+# библиотеки Go — stdlib/Go. Экосистемы совпадают с перечнем OSV.
+# ВАЖНО: альтернативы группируем скобками, иначе приоритет | ломает \b-границы
+# (например "httpd" без границ матчил бы "lighttpd"). Порядок записей значим:
+# сначала более специфичные продукты.
+_OSV_MAP = [
+    # Apache HTTP Server: "Apache", "Apache httpd", "apache2" — но НЕ "lighttpd".
+    (re.compile(r"\bapache(?:2)?\b|\bhttpd\b", re.I),
+     ("apache", "OSS-Fuzz", True)),
+    (re.compile(r"\bnginx\b", re.I),           ("nginx", "OSS-Fuzz", True)),
+    # OpenSSH: "OpenSSH" или отдельное слово "ssh" (но не внутри других слов).
+    (re.compile(r"\b(?:openssh|ssh)\b", re.I),  ("openssh", "OSS-Fuzz", True)),
+    (re.compile(r"\bopenssl\b", re.I),         ("openssl", "OSS-Fuzz", True)),
+    (re.compile(r"\bcurl\b", re.I),            ("curl", "OSS-Fuzz", True)),
+    (re.compile(r"\bsqlite\b", re.I),          ("sqlite3", "OSS-Fuzz", True)),
+    (re.compile(r"\bpostgre\w*", re.I),        ("postgresql", "OSS-Fuzz", True)),
+    # Go: стандартная библиотека (net/http server и т.п.) → stdlib/Go.
+    (re.compile(r"\bgo(?:lang)?\b|net/http", re.I),
+     ("stdlib", "Go", True)),
+    # Интерпретируемые экосистемы — прямое соответствие имени пакета.
+    (re.compile(r"\bpython\b", re.I),          ("cpython", "OSS-Fuzz", True)),
+]
+
+
+def map_to_osv(product):
+    """Сопоставить баннер продукта с (osv_name, ecosystem, need_version).
+
+    Возвращает None, если продукт не удалось сопоставить с экосистемой OSV —
+    в этом случае онлайн-запрос НЕ выполняется (был бы HTTP 400 или пусто).
+    """
+    s = str(product or "").strip().lower()
+    if not s:
+        return None
+    for rx, spec in _OSV_MAP:
+        if rx.search(s):
+            return spec
+    return None
+
+
 def lookup_osv(product, version, log=None):
     """Онлайн-запрос к OSV (api.osv.dev) по продукту+версии.
 
     Запрос выполняется СО СТОРОНЫ СКАНЕРА (не через цель). Любая ошибка/таймаут
     → возвращается пустой список (graceful degradation). Результат кешируется.
+
+    v1.6.2: запрос формируется по таблице маппинга _OSV_MAP (name+ecosystem).
+    Заведомо некорректные запросы (нет версии/экосистемы, неизвестный продукт)
+    НЕ отправляются — это устраняет поток HTTP 400 «Invalid query».
     """
     # Нормализуем вход: хвостовые пробелы в product/version — частая причина
     # HTTP 400 Bad Request от OSV (требование 5 v1.5.0).
@@ -266,14 +356,26 @@ def lookup_osv(product, version, log=None):
         _cache_put(product, version, [])
         return []
 
+    # v1.6.2: сопоставляем продукт с экосистемой OSV. Без сопоставления или без
+    # обязательной версии онлайн-запрос НЕ шлём (иначе гарантированный 400).
+    spec = map_to_osv(product)
+    if spec is None:
+        _log(f"OSV: продукт «{product}» не сопоставлен с экосистемой OSV "
+             f"— онлайн-запрос пропущен (используется offline)")
+        _cache_put(product, version, [])
+        return []
+    osv_name, ecosystem, need_ver = spec
+    if need_ver and not version:
+        _log(f"OSV: для «{product}» ({osv_name}/{ecosystem}) нет версии "
+             f"— онлайн-запрос без версии не отправляю (используется offline)")
+        _cache_put(product, version, [])
+        return []
+
     findings = []
-    # OSV принимает package.name + version; для нативного ПО точное сопоставление
-    # ограничено, поэтому используем эвристический запрос по имени продукта.
-    # ФИКС HTTP 400 (требование 5): OSV возвращает 400 Bad Request, если в
-    # запросе передана ПУСТАЯ строка version (version: ""). Поэтому ключ
-    # version добавляем ТОЛЬКО при наличии непустой версии; иначе шлём только
-    # package.name (без версии OSV вернёт все известные CVE пакета).
-    query = {"package": {"name": product.lower()}}
+    # ФИКС HTTP 400 (v1.6.2): OSV требует ОДНОВРЕМЕННО package.name И
+    # package.ecosystem при идентификации по имени. Формируем корректный
+    # запрос; версию добавляем отдельным полем верхнего уровня.
+    query = {"package": {"name": osv_name, "ecosystem": ecosystem}}
     if version:
         query["version"] = version
     payload = json.dumps(query).encode("utf-8")
