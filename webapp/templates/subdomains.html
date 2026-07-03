@@ -21,6 +21,7 @@
     <span class="sum-chip sum-live">актуальные: <strong>{{ summary.present }}</strong></span>
     <span class="sum-chip sum-palo">исчезнувшие: <strong>{{ summary.gone }}</strong></span>
     {% if summary.auto_resolved %}<span class="sum-chip sum-auto">разрешено конфликтов IP: <strong>{{ summary.auto_resolved }}</strong></span>{% endif %}
+    {% if summary.artifacts %}<span class="sum-chip sum-artifact" title="Поддомены, не прошедшие проверку соответствия IP (прямая/обратная)">артефакты обнаружения: <strong>{{ summary.artifacts }}</strong></span>{% endif %}
   </div>
 
   <p class="muted small">
@@ -31,6 +32,14 @@
     FQDN выбирается один актуальный IP, а сводка по всем использованным утилитам
     и разрешённым конфликтам показана в столбце «Информация». Массовые операции
     выполняются с подтверждением.
+  </p>
+  <p class="muted small">
+    v1.6.4: поддомены от <code>dnsmap</code>/<code>dnsrecon</code>/<code>dnsenum</code>
+    проверяются на <strong>соответствие IP</strong> (прямой резолв + обратная
+    зона PTR). Не прошедшие проверку помечаются как
+    <span class="st-badge st-artifact">артефакт обнаружения</span>, смещаются
+    <strong>вниз таблицы</strong> и <strong>исключаются</strong> из кнопки
+    «Привязать все новые» (привязать вручную всё равно можно).
   </p>
 
   {# Массовые операции (треб. 5) с подтверждением. #}
@@ -68,10 +77,10 @@
     </thead>
     <tbody>
     {% for s in subs %}
-      {# Подсветка строк: актуальные (present) / исчезнувшие (not present). #}
-      <tr class="{% if s.present %}row-new{% else %}row-gone{% endif %}">
+      {# Подсветка строк: артефакты (v1.6.4) / актуальные / исчезнувшие. #}
+      <tr class="{% if s.is_artifact %}row-artifact{% elif s.present %}row-new{% else %}row-gone{% endif %}">
         <td><code>{{ s.parent }}</code></td>
-        <td><code>{{ s.subdomain }}</code></td>
+        <td><code>{{ s.subdomain }}</code>{% if s.is_artifact %} <span class="st-badge st-artifact" title="{{ s.verify_reason or 'Не прошёл проверку соответствия IP' }}">артефакт</span>{% endif %}</td>
         <td>
           {% if s.resolved_ip %}
             <span class="ip-resolved" title="IP подтверждён оператором вручную">{{ s.resolved_ip }}</span>
@@ -128,6 +137,7 @@
           {% endif %}
         </td>
         <td>
+          {% if s.is_artifact %}<span class="st-badge st-artifact" title="{{ s.verify_reason or '' }}">артефакт обнаружения</span>{% endif %}
           {% if s.present %}<span class="st-badge st-present">актуальный</span>
           {% else %}<span class="st-badge st-gone">исчезнувший</span>{% endif %}
           {% if s.bound %}<span class="st-badge st-bound">привязан</span>{% endif %}
@@ -160,7 +170,10 @@
 
   <p class="legend">
     <span class="row-legend row-new">актуальный</span> — обнаружен в последнем скане;
-    <span class="row-legend row-gone">исчезнувший</span> — был ранее, сейчас не найден.
+    <span class="row-legend row-gone">исчезнувший</span> — был ранее, сейчас не найден;
+    <span class="row-legend row-artifact">артефакт</span> — не прошёл проверку
+    соответствия IP (прямая/обратная), смещён вниз и исключён из
+    «Привязать все новые».
     Конфликты IP разрешаются автоматически; сводка — в столбце «Информация».
   </p>
   {% endif %}

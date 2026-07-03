@@ -324,10 +324,11 @@ _CIRCL_MAP = [
 
 
 def map_to_circl(product):
-    """Сопоставить баннер продукта с (vendor, product, need_version) для CIRCL.
+    """Сопоставить баннер продукта с (vendor, product, need_version) по статической таблице.
 
-    Возвращает None, если продукт не удалось сопоставить — в этом случае
-    онлайн-запрос НЕ выполняется (использовалась бы только offline-таблица).
+    Быстрый путь для частых продуктов. Возвращает None, если баннер не
+    нашёлся в статической таблице (тогда пробуется динамическое
+    разрешение через resolve_vendor_product).
     """
     s = str(product or "").strip().lower()
     if not s:
@@ -342,7 +343,194 @@ def map_to_circl(product):
 map_to_osv = map_to_circl
 
 
+# ==========================================================================
+# 2б) ДИНАМИЧЕСКОЕ разрешение vendor/product через CIRCL browse (v1.6.4)
+# ==========================================================================
+# Статическая таблица покрывает только частые продукты. Для остальных
+# баннеров (например «Tandberg-4145 VoIP server») раньше онлайн-запрос
+# просто пропускался. Теперь при наличии версии мы пытаемся
+# СОПОСТАВИТЬ баннер с реальными vendor/product из каталога CIRCL:
+#   * GET /api/browse/            → полный список vendor-слагов (~60тыс, кеш);
+#   * GET /api/browse/<vendor>    → список product-слагов этого vendor.
+# Токены баннера (без версий и шумовых слов) сверяются с vendor-слагами,
+# затем среди product-слагов vendor ищется лучшее совпадение по токенам.
+
+# Шумовые слова в баннерах, которые НЕ являются именем vendor/product.
+_BANNER_STOPWORDS = {
+    "server", "service", "daemon", "httpd", "voip", "sip", "ftp", "ftpd",
+    "smtp", "pop3", "imap", "http", "https", "ssl", "tls", "proxy", "gateway",
+    "the", "and", "for", "version", "build", "release", "open", "source",
+    "web", "edition", "software", "system", "linux", "unix", "windows",
+    "embedded", "appliance", "router", "switch", "firewall", "printer",
+}
+
+# Кеш списка vendor-слагов и product-слагов (на время процесса).
+_CIRCL_VENDORS = None            # set всех vendor-слагов (или None/ошибка)
+_CIRCL_PRODUCTS_CACHE = {}       # vendor → [product-слаги]
+CIRCL_BROWSE = "https://cve.circl.lu/api/browse/"   # + [<vendor>]
+
+
+def _banner_tokens(product):
+    """Значимые токены баннера для сопоставления со слагами CIRCL.
+
+    Берём буквенно-цифровые слова длиной ≥ 3, отбрасываем шумовые
+    слова и чисто числовые (номера моделей). Порядок сохраняется.
+    """
+    raw = re.findall(r"[A-Za-z][A-Za-z0-9]{2,}", str(product or ""))
+    out = []
+    for t in raw:
+        tl = t.lower()
+        if tl in _BANNER_STOPWORDS or tl.isdigit():
+            continue
+        # Артефакты версий вида «X14», «v2» — одна буква + только цифры.
+        if re.fullmatch(r"[a-z]\d+", tl):
+            continue
+        if tl not in out:
+            out.append(tl)
+    return out
+
+
+def _circl_browse(vendor=None, log=None, detail=None):
+    """GET /api/browse[/<vendor>] → список слагов (или [] при ошибке)."""
+    url = CIRCL_BROWSE + (urllib.parse.quote(vendor) if vendor else "")
+    if detail:
+        detail(f"CIRCL browse: GET {url}")
+    req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
+    try:
+        opener = _http_opener()
+        with opener.open(req, timeout=_HTTP_TIMEOUT) as resp:
+            data = json.loads(resp.read().decode("utf-8", "replace"))
+    except Exception as e:  # noqa: BLE001
+        if log:
+            log("[cve] CIRCL browse " + (vendor or "<vendors>")
+                + f" недоступен: {e}")
+        return []
+    # Формат: либо список, либо {"vendors":[...]} / {"product":[...]}.
+    if isinstance(data, list):
+        return [str(x).lower() for x in data]
+    if isinstance(data, dict):
+        for key in ("vendor", "vendors", "product", "products"):
+            v = data.get(key)
+            if isinstance(v, list):
+                return [str(x).lower() for x in v]
+    return []
+
+
+def _circl_vendors(log=None, detail=None):
+    """Множество всех vendor-слагов CIRCL (кеш на процесс)."""
+    global _CIRCL_VENDORS
+    if _CIRCL_VENDORS is not None:
+        return _CIRCL_VENDORS
+    lst = _circl_browse(None, log=log, detail=detail)
+    _CIRCL_VENDORS = set(lst) if lst else set()
+    if log and _CIRCL_VENDORS:
+        log(f"[cve] CIRCL: каталог vendor-слагов загружен — всего "
+            f"{len(_CIRCL_VENDORS)}")
+    return _CIRCL_VENDORS
+
+
+def _circl_products(vendor, log=None, detail=None):
+    """Список product-слагов для vendor (кеш на процесс)."""
+    if vendor in _CIRCL_PRODUCTS_CACHE:
+        return _CIRCL_PRODUCTS_CACHE[vendor]
+    lst = _circl_browse(vendor, log=log, detail=detail)
+    _CIRCL_PRODUCTS_CACHE[vendor] = lst
+    return lst
+
+
+def _best_product(products, tokens):
+    """Выбрать лучший product-слаг по совпадению токенов баннера.
+
+    Приоритет: точное равенство токену > слаг содержит токен >
+    токен содержит слаг. Если ничего не подходит — None.
+    """
+    if not products:
+        return None
+    best, best_score = None, 0
+    for slug in products:
+        sl = str(slug).lower()
+        norm = sl.replace("_", " ").replace("-", " ").split()
+        score = 0
+        for t in tokens:
+            if sl == t:
+                score = max(score, 100)
+            elif t in norm:
+                score = max(score, 80)
+            elif t in sl and len(t) >= 4:
+                score = max(score, 50)
+            elif sl in t and len(sl) >= 4:
+                score = max(score, 40)
+        if score > best_score:
+            best, best_score = sl, score
+    return best if best_score >= 40 else None
+
+
+def resolve_vendor_product(product, log=None, detail=None):
+    """Полное разрешение баннера в (vendor, product, need_ver).
+
+    1. Статическая таблица (map_to_circl) — быстрый путь для частых ПО.
+    2. Динамическое разрешение через CIRCL browse: токены баннера →
+       vendor-слаг → лучший product-слаг. need_ver=True (без версии
+       динамический поиск не запускаем — слишком много шума).
+
+    Возвращает (vendor, product, need_ver) или None.
+    """
+    static = map_to_circl(product)
+    if static is not None:
+        return static
+    # Динамика только при доступности источника (не дёргаем сеть впустую).
+    if _ONLINE_REACHABLE is False:
+        return None
+    tokens = _banner_tokens(product)
+    if not tokens:
+        return None
+    vendors = _circl_vendors(log=log, detail=detail)
+    if not vendors:
+        return None
+    # Ищем vendor-слаг: точное совпадение токену или vendor начинается с него.
+    for t in tokens:
+        if t in vendors:
+            vendor = t
+        else:
+            cand = [v for v in vendors
+                    if v == t or (len(t) >= 4 and v.startswith(t))]
+            if not cand:
+                continue
+            # Короче — ближе к точному vendor.
+            vendor = sorted(cand, key=len)[0]
+        products = _circl_products(vendor, log=log, detail=detail)
+        prod = _best_product(products, tokens)
+        if prod is None and vendor in products:
+            prod = vendor
+        if prod is None and len(products) == 1:
+            # У vendor единственный продукт — берём его.
+            prod = products[0]
+        if prod:
+            if log:
+                log(f"[cve] CIRCL: баннер «{product}» динамически сопоставлен "
+                    f"→ {vendor}/{prod}")
+            return (vendor, prod, True)
+    return None
+
+
 # --- Сравнение версий и фильтр «затронута ли версия» ----------------------
+
+# Версия в баннере: «X14.3.6», «2.4.49», «v1.2» — минимум две группы цифр,
+# возможный однобуквенный префикс (X/v). Номера моделей вроде
+# «Tandberg-4145» (одна группа) не считаются версией.
+_BANNER_VER_RE = re.compile(r"\b[Xxvv]?(\d+(?:\.\d+){1,3})\b")
+
+
+def _version_from_banner(banner):
+    """Извлечь версию из текста баннера (если нет отдельного поля).
+
+    Пример: «Tandberg-4145 VoIP server X14.3.6» → '14.3.6'. Берётся
+    ПОСЛЕДНее совпадение (версия ПО обычно в конце баннера,
+    а номер модели — рядом с именем). Возвращает '' если нет.
+    """
+    matches = _BANNER_VER_RE.findall(str(banner or ""))
+    return matches[-1] if matches else ""
+
 
 def _version_tuple(v):
     """Числовой кортеж версии для сравнения (напр. '2.4.49' → (2,4,49))."""
@@ -416,11 +604,14 @@ def _extract_desc(rec):
 _CIRCL_MAX_FINDINGS = 15
 
 
-def lookup_circl(product, version, log=None):
+def lookup_circl(product, version, log=None, detail=None):
     """Онлайн-запрос к CIRCL cve-search по vendor/product с фильтром по версии.
 
     Запрос выполняется СО СТОРОНЫ СКАНЕРА (не через цель). Любая ошибка/таймаут
     → пустой список (graceful degradation). Результат кешируется.
+
+    detail (v1.6.4, Правка 3) — callback детального файл-лога: пишет сырой
+    URL запроса, размер ответа и число найденных CVE ТОЛЬКО в файл.
     """
     product = str(product or "").strip()
     version = str(version or "").strip()
@@ -428,20 +619,35 @@ def lookup_circl(product, version, log=None):
         return []
     cached = _cache_get(product, version)
     if cached is not None:
+        if detail:
+            detail(f"CIRCL: кэш-попадание для «{product}»/«{version or '—'}» "
+                   f"→ находок {len(cached)}")
         return cached
 
     def _log(m):
         if log:
             log("[cve] " + m)
+        if detail:
+            detail(m)
 
     # Если однократная проверка показала недоступность — не дёргаем сеть.
     if _ONLINE_REACHABLE is False:
         _cache_put(product, version, [])
         return []
 
-    spec = map_to_circl(product)
+    # v1.6.4: если версия пустая, пробуем извлечь её из баннера
+    # (напр. «Tandberg-4145 VoIP server X14.3.6» → 14.3.6).
+    if not version:
+        vguess = _version_from_banner(product)
+        if vguess:
+            version = vguess
+            _log(f"CIRCL: версия извлечена из баннера «{product}» → {version}")
+
+    # v1.6.4: разрешение через статическую таблицу + динамику (CIRCL browse).
+    spec = resolve_vendor_product(product, log=log, detail=detail)
     if spec is None:
         _log(f"CIRCL: продукт «{product}» не сопоставлен с vendor/product "
+             f"(ни статически, ни через каталог CIRCL) "
              f"— онлайн-запрос пропущен (используется offline)")
         _cache_put(product, version, [])
         return []
@@ -451,14 +657,21 @@ def lookup_circl(product, version, log=None):
              f"— онлайн-запрос без версии не отправляю (используется offline)")
         _cache_put(product, version, [])
         return []
+    _log(f"CIRCL: запрос {vendor}/{prod} (версия цели: {version or '—'})")
 
     url = (CIRCL_SEARCH + urllib.parse.quote(vendor) + "/"
            + urllib.parse.quote(prod))
+    if detail:
+        detail(f"CIRCL: GET {url} (User-Agent={_USER_AGENT}, "
+               f"timeout={_HTTP_TIMEOUT}s)")
     req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
     try:
         opener = _http_opener()
         with opener.open(req, timeout=_HTTP_TIMEOUT) as resp:
-            data = json.loads(resp.read().decode("utf-8", "replace"))
+            raw = resp.read().decode("utf-8", "replace")
+        if detail:
+            detail(f"CIRCL: ответ получен, размер {len(raw)} байт")
+        data = json.loads(raw)
     except urllib.error.HTTPError as e:
         _log(f"CIRCL HTTP {e.code} для {vendor}/{prod} "
              f"— пропускаю (используется offline)")
@@ -502,6 +715,9 @@ def lookup_circl(product, version, log=None):
         })
         if len(findings) >= _CIRCL_MAX_FINDINGS:
             break
+    if detail:
+        detail(f"CIRCL: строк nvd/cvelistv5 в ответе: {len(rows)}, "
+               f"отобрано CVE после фильтра версии: {len(findings)}")
     _cache_put(product, version, findings)
     return findings
 
@@ -510,11 +726,13 @@ def lookup_circl(product, version, log=None):
 lookup_osv = lookup_circl
 
 
-def lookup_online(product, version, log=None):
+def lookup_online(product, version, log=None, detail=None):
     """Объединяющий онлайн-поиск (v1.6.3: CIRCL cve-search)."""
     if _cve_source() == "off":
+        if detail:
+            detail("CIRCL: NETINV_CVE_SOURCE=off — онлайн-поиск отключён")
         return []
-    return lookup_circl(product, version, log=log)
+    return lookup_circl(product, version, log=log, detail=detail)
 
 
 # ==========================================================================
@@ -563,19 +781,27 @@ def nvd_link(cve_id):
     return NVD_URL + urllib.parse.quote(cid)
 
 
-def collect_cves(product, version, online=True, log=None):
+def collect_cves(product, version, online=True, log=None, detail=None):
     """Собрать CVE из offline-таблицы и (опционально) онлайн-источника.
 
     Возвращает список находок, дедуплицированных по cve_id (offline имеет
     приоритет описания). Каждая запись пригодна для build_cve_finding().
+
+    detail (v1.6.4, Правка 3) — callback детального файл-лога.
     """
     merged = {}
-    for f in lookup_offline(product, version):
+    off = lookup_offline(product, version)
+    for f in off:
         merged[f["cve_id"]] = f
+    if detail:
+        detail(f"CVE: offline-таблица дала {len(off)} находок "
+               f"для «{product}»/«{version or '—'}» (online={online})")
     if online:
-        for f in lookup_online(product, version, log=log):
+        for f in lookup_online(product, version, log=log, detail=detail):
             if f["cve_id"] not in merged:
                 merged[f["cve_id"]] = f
+    if detail:
+        detail(f"CVE: итого после слияния offline+online: {len(merged)}")
     return list(merged.values())
 
 

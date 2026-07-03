@@ -132,6 +132,110 @@ def resolve_host(name, timeout=RESOLVE_TIMEOUT):
     return sorted(ips)
 
 
+def reverse_lookup(ip, timeout=RESOLVE_TIMEOUT):
+    """Обратный резолв IP → список PTR-имён (FQDN). Сначала ``dig -x``,
+    иначе ``socket.gethostbyaddr``.
+
+    Возвращает отсортированный список уникальных имён в нижнем регистре
+    без завершающей точки (может быть пустым — многие IP не имеют PTR).
+    """
+    ip = (ip or "").strip()
+    if not ip or not _IPV4_RE.fullmatch(ip):
+        return []
+    names = set()
+
+    dig = shutil.which("dig")
+    if dig:
+        try:
+            out = subprocess.run(
+                [dig, "+short", "-x", ip],
+                capture_output=True, text=True, timeout=timeout)
+            for line in out.stdout.splitlines():
+                line = line.strip().rstrip(".").lower()
+                # dig -x отдаёт PTR-имена (могут быть с завершающей точкой).
+                if line and _HOST_RE.fullmatch(line):
+                    names.add(line)
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+
+    # Резервный путь — системный резолвер.
+    if not names:
+        try:
+            host, aliases, _ = socket.gethostbyaddr(ip)
+            for h in [host] + list(aliases or []):
+                h = (h or "").strip().rstrip(".").lower()
+                if h:
+                    names.add(h)
+        except (socket.herror, socket.gaierror, OSError):
+            pass
+
+    return sorted(names)
+
+
+def verify_subdomain(subdomain, ip, timeout=RESOLVE_TIMEOUT):
+    """Проверка соответствия поддомена IP — прямая и обратная (v1.6.4).
+
+    Правка 1: поддомены, обнаруженные dnsmap/dnsrecon/dnsenum, проверяем
+    на реальную привязку к IP, чтобы отсеять артефакты обнаружения
+    (wildcard-DNS, «мусорные» ответы, catch-all записи).
+
+    Критерии подтверждения (ПОДТВЕРЖДЁН, is_artifact=0):
+      1. Прямая проверка: имя резолвится и заявленный ip входит в набор
+         прямого резолва имени (A-записи).
+      2. Обратная проверка: PTR для ip указывает на имя, которое совпадает
+         с поддоменом ИЛИ принадлежит тому же apex-домену (родителю).
+
+    Если IP нет вовсе, ИЛИ прямая проверка не прошла, ИЛИ обратная
+    проверка невозможна/не соответствует — поддомен считается
+    АРТЕФАКТОМ обнаружения (is_artifact=1).
+
+    Возвращает dict:
+        {"is_artifact": 0|1, "forward_ok": bool, "reverse_ok": bool,
+         "reason": str, "ptr": [PTR-имена]}
+    """
+    subdomain = (subdomain or "").strip().lower().rstrip(".")
+    ip = (ip or "").strip()
+
+    # Нет IP — привязать не к чему, это артефакт обнаружения.
+    if not ip or not _IPV4_RE.fullmatch(ip):
+        return {"is_artifact": 1, "forward_ok": False, "reverse_ok": False,
+                "reason": "нет IP-адреса", "ptr": []}
+
+    # 1) Прямая проверка: имя резолвится и содержит заявленный IP.
+    fwd = resolve_host(subdomain, timeout=timeout)
+    forward_ok = ip in fwd
+
+    # 2) Обратная проверка: PTR указывает на имя того же apex-домена.
+    ptr = reverse_lookup(ip, timeout=timeout)
+    apex = ".".join(subdomain.split(".")[-2:]) if subdomain else ""
+    reverse_ok = False
+    for name in ptr:
+        if name == subdomain:
+            reverse_ok = True
+            break
+        if apex and (name == apex or name.endswith("." + apex)):
+            reverse_ok = True
+            break
+
+    if forward_ok and reverse_ok:
+        return {"is_artifact": 0, "forward_ok": True, "reverse_ok": True,
+                "reason": "прямая и обратная проверки пройдены", "ptr": ptr}
+
+    # Формируем человекочитаемую причину для артефакта.
+    if not forward_ok and not fwd:
+        reason = "имя не резолвится (нет A-записи)"
+    elif not forward_ok:
+        reason = (f"прямой резолв не содержит {ip} "
+                  f"(A-записи: {', '.join(fwd) or '—'})")
+    elif not ptr:
+        reason = "обратная зона (PTR) отсутствует"
+    else:
+        reason = (f"PTR ({', '.join(ptr)}) не соответствует "
+                  f"домену {apex or subdomain}")
+    return {"is_artifact": 1, "forward_ok": forward_ok,
+            "reverse_ok": reverse_ok, "reason": reason, "ptr": ptr}
+
+
 # ----------------------- разбор вывода утилит -----------------------
 
 def _extract_pairs(text, parent):
@@ -167,22 +271,45 @@ def _extract_pairs(text, parent):
 
 # ----------------------- запуск конкретных утилит -----------------------
 
-def _run_dnsmap(domain, brute, timeout):
+def _detail_dns_run(detail, cmd, out, err=""):
+    """Записать сырой вывод DNS-утилиты в детальный файл-лог (v1.6.4).
+
+    detail — callback (обычно slog.make_detail_sink('dns')) или None.
+    Пишет команду и stdout/stderr УТИЛИТ ТОЛЬКО в файл, не в консоль.
+    Раньше сырой вывод dnsmap/dnsenum/dnsrecon нигде не сохранялся.
+    """
+    if not detail:
+        return
+    try:
+        detail("$ " + " ".join(str(c) for c in cmd))
+        if out:
+            detail("--- stdout ---")
+            detail(str(out).rstrip())
+        if err:
+            detail("--- stderr ---")
+            detail(str(err).rstrip())
+        detail("--- конец вывода ---")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _run_dnsmap(domain, brute, timeout, detail=None):
     """dnsmap — поиск поддоменов перебором по встроенному словарю."""
     pairs, leftover = [], set()
     cmd = ["dnsmap", domain]
     try:
         out = subprocess.run(cmd, capture_output=True, text=True,
                              timeout=timeout)
+        _detail_dns_run(detail, cmd, out.stdout, out.stderr)
         p, lo = _extract_pairs(out.stdout + "\n" + out.stderr, domain)
         pairs.extend(p)
         leftover |= lo
-    except (subprocess.TimeoutExpired, OSError):
-        pass
+    except (subprocess.TimeoutExpired, OSError) as e:
+        _detail_dns_run(detail, cmd, "", f"исключение/таймаут: {e}")
     return pairs, leftover
 
 
-def _run_dnsenum(domain, brute, timeout):
+def _run_dnsenum(domain, brute, timeout, detail=None):
     """dnsenum — комплексная разведка DNS (NS, MX, перебор поддоменов)."""
     pairs, leftover = [], set()
     # --noreverse ускоряет; перебор словарём оставляем по умолчанию.
@@ -193,15 +320,16 @@ def _run_dnsenum(domain, brute, timeout):
     try:
         out = subprocess.run(cmd, capture_output=True, text=True,
                              timeout=timeout)
+        _detail_dns_run(detail, cmd, out.stdout, out.stderr)
         p, lo = _extract_pairs(out.stdout + "\n" + out.stderr, domain)
         pairs.extend(p)
         leftover |= lo
-    except (subprocess.TimeoutExpired, OSError):
-        pass
+    except (subprocess.TimeoutExpired, OSError) as e:
+        _detail_dns_run(detail, cmd, "", f"исключение/таймаут: {e}")
     return pairs, leftover
 
 
-def _run_dnsrecon(domain, brute, timeout):
+def _run_dnsrecon(domain, brute, timeout, detail=None):
     """dnsrecon — стандартная разведка, при brute=True добавляем перебор."""
     pairs, leftover = [], set()
     # -t std: стандартные записи (A, NS, MX, SOA, SRV).
@@ -213,11 +341,12 @@ def _run_dnsrecon(domain, brute, timeout):
     try:
         out = subprocess.run(cmd, capture_output=True, text=True,
                              timeout=timeout)
+        _detail_dns_run(detail, cmd, out.stdout, out.stderr)
         p, lo = _extract_pairs(out.stdout + "\n" + out.stderr, domain)
         pairs.extend(p)
         leftover |= lo
-    except (subprocess.TimeoutExpired, OSError):
-        pass
+    except (subprocess.TimeoutExpired, OSError) as e:
+        _detail_dns_run(detail, cmd, "", f"исключение/таймаут: {e}")
     return pairs, leftover
 
 
@@ -230,13 +359,15 @@ _TOOLS = {
 
 # ----------------------- разведка поддоменов apex-домена -----------------------
 
-def discover_subdomains(domain, brute=False, log=None):
+def discover_subdomains(domain, brute=False, log=None, detail=None):
     """Поиск поддоменов apex-домена доступными утилитами.
 
     Параметры:
         domain — домен второго уровня (apex).
         brute  — включить brute-force перебор словарём (медленнее, полнее).
         log    — необязательная функция логирования (например print).
+        detail — callback детального файл-лога (v1.6.4, Правка 3):
+                 сырой вывод dnsmap/dnsenum/dnsrecon пишется ТОЛЬКО в файл.
 
     Возвращает: (subdomains, tools_used, tools_missing)
         где subdomains — список dict {parent, subdomain, ip, tool}.
@@ -244,6 +375,8 @@ def discover_subdomains(domain, brute=False, log=None):
     def _log(msg):
         if log:
             log(msg)
+        if detail:
+            detail(msg)
 
     domain = (domain or "").strip().lower().rstrip(".")
     timeout = RECON_TIMEOUT_BRUTE if brute else RECON_TIMEOUT
@@ -259,7 +392,7 @@ def discover_subdomains(domain, brute=False, log=None):
         tools_used.append(tool_name)
         mode = "brute-force" if brute else "обычный"
         _log(f"[dns_recon] {tool_name}: разведка {domain} ({mode} режим)")
-        pairs, leftover = runner(domain, brute, timeout)
+        pairs, leftover = runner(domain, brute, timeout, detail=detail)
         for sub, ip in pairs:
             key = (sub, ip)
             found.setdefault(key, tool_name)
@@ -283,7 +416,7 @@ def discover_subdomains(domain, brute=False, log=None):
 
 # ----------------------- основная точка входа -----------------------
 
-def recon_domain(domain, brute=False, log=None):
+def recon_domain(domain, brute=False, log=None, detail=None):
     """Полная обработка одного домена объекта сканирования.
 
     * apex-домен (2 метки)  -> поиск поддоменов + резолв.
@@ -315,24 +448,45 @@ def recon_domain(domain, brute=False, log=None):
         result["fqdn_by_ip"].setdefault(ip, domain)
 
     if apex:
-        subs, used, missing = discover_subdomains(domain, brute=brute, log=log)
+        subs, used, missing = discover_subdomains(domain, brute=brute, log=log,
+                                                   detail=detail)
         result["tools_used"] = used
         result["tools_missing"] = missing
         for s in subs:
-            result["subdomains"].append(s)
+            # v1.6.4 (Правка 1): проверяем соответствие IP (прямая+обратная).
+            # Поддомены от dnsmap/dnsrecon/dnsenum могут быть артефактами
+            # (wildcard/catch-all). Резолв (tool='resolve') тоже проверяем.
             ip = s.get("ip")
-            if ip:
-                # Поддомены, найденные разведкой, имеют источник 'subdomain'.
+            ver = verify_subdomain(s["subdomain"], ip, timeout=RESOLVE_TIMEOUT)
+            s["is_artifact"] = ver["is_artifact"]
+            s["verify_reason"] = ver["reason"]
+            if detail:
+                detail(f"[dns_recon] verify {s['subdomain']} → {ip or '—'}: "
+                       f"forward_ok={ver.get('forward_ok')}, "
+                       f"reverse_ok={ver.get('reverse_ok')}, "
+                       f"PTR={ver.get('ptr') or '—'}, "
+                       f"is_artifact={ver['is_artifact']} — {ver['reason']}")
+            if ver["is_artifact"]:
+                _mark = "АРТЕФАКТ"
+            else:
+                _mark = "подтверждён"
+            if log:
+                log(f"[dns_recon] {s['subdomain']} → {ip or '—'}: "
+                    f"{_mark} ({ver['reason']})")
+            result["subdomains"].append(s)
+            if ip and not ver["is_artifact"]:
+                # Только ПОДТВЕРЖДЁННЫЕ поддомены дают IP к сканированию.
                 result["ips"].setdefault(ip, "subdomain")
                 result["fqdn_by_ip"].setdefault(ip, s["subdomain"])
     else:
         # Домен третьего+ уровня — это и есть «поддомен», только резолвим.
-        # Родитель — домен на уровень выше.
+        # Родитель — домен на уровень выше. Это явно заданная цель — не артефакт.
         parent = ".".join(domain.split(".")[1:])
         for ip in resolve_host(domain):
             result["subdomains"].append({
                 "parent": parent, "subdomain": domain,
-                "ip": ip, "tool": "resolve",
+                "ip": ip, "tool": "resolve", "is_artifact": 0,
+                "verify_reason": "явно заданный объект сканирования",
             })
 
     return result

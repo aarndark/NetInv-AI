@@ -34,3 +34,6 @@ logs/
 # Системные файлы ОС
 .DS_Store
 Thumbs.db
+
+# Кэш онлайн-CVE (CIRCL) — не хранить в репозитории
+data/cve_cache/

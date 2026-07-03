@@ -214,17 +214,34 @@ def format_report(result):
     return lines
 
 
-def preflight(log=None):
+def preflight(log=None, detail=None):
     """Выполнить проверку и вывести/залогировать сводку.
 
     log — функция логирования (например, ScanLogger.log или print). Если None,
     используется print. Возвращает результат check_tools() для дальнейшего
     использования (например, чтобы решить, запускать ли vulners NSE).
+
+    detail (v1.6.4, Правка 3) — callback детального файл-лога: пишет
+    полный разбор каждой утилиты (путь/отсутствие/hint) ТОЛЬКО в файл.
     """
     result = check_tools()
     emit = log or print
     for line in format_report(result):
         emit(line)
+    if detail:
+        detail("=== детальный разбор preflight ===")
+        for rec in result.get("available", []):
+            detail(f"[+] {rec['key']} ({rec['bin']}): {rec.get('path', '')} "
+                   f"— {rec.get('purpose', '')}"
+                   + (" [ОБЯЗ.]" if rec.get("required") else ""))
+        for rec in result.get("missing", []):
+            detail(f"[-] {rec['key']} ({rec['bin']}): ОТСУТСТВУЕТ — "
+                   f"{rec.get('purpose', '')}; установка: "
+                   f"{rec.get('install', '')}"
+                   + (" [ОБЯЗ.]" if rec.get("required") else ""))
+        detail(f"nse_vulners доступен: {result.get('nse_vulners')}; "
+               f"отсутствуют обязательные: "
+               f"{result.get('required_missing') or 'нет'}")
     return result
 
 

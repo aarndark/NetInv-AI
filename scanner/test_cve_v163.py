@@ -162,24 +162,62 @@ def test_mapping():
 
 
 # --- 2. Отсечка: без версии / без маппинга запрос НЕ уходит ----------------
+# ПРИМЕЧАНИЕ v1.6.4: при отсутствии статического маппинга теперь запускается
+# динамическое разрешение через каталог CIRCL (/api/browse). Поэтому сетевой
+# вызов к КАТАЛОГУ допустим, но запрос к /api/search уходить НЕ должен, если
+# продукт так и не сопоставлен или нет версии. Проверяем именно search.
+class _NoSearchOpener:
+    """Отдаёт каталог browse БЕЗ нужного vendor; на /api/search — «взрыв»."""
+    def __init__(self, vendors=None):
+        self.calls = 0
+        self.search_calls = 0
+        self._vendors = vendors if vendors is not None else ["apache", "nginx"]
+
+    def open(self, req, timeout=None):
+        self.calls += 1
+        url = req.full_url if hasattr(req, "full_url") else str(req)
+        if "/api/search/" in url:
+            self.search_calls += 1
+            raise AssertionError("ЗАПРОС /api/search НЕ ДОЛЖЕН БЫЛ УЙТИ")
+        # browse: список vendor-слагов / product-слагов.
+        body = json.dumps(self._vendors).encode("utf-8")
+
+        class _R:
+            status = 200
+
+            def read(self_inner):
+                return body
+
+            def __enter__(self_inner):
+                return self_inner
+
+            def __exit__(self_inner, *a):
+                return False
+        return _R()
+
+
 def test_skip_without_request():
-    opener = _SentinelOpener()
+    c._CIRCL_VENDORS = None            # сброс процессного кеша каталога
+    c._CIRCL_PRODUCTS_CACHE = {}
+    opener = _NoSearchOpener(vendors=["apache", "nginx"])
     c._http_opener = lambda: opener
     c._ONLINE_REACHABLE = True   # источник «достижим»
     _clear_cache()
 
-    # a) Нет сопоставления → запрос не уходит, [].
-    r = c.lookup_circl("Cisco Expressway E", "X8.11.4")
-    check("нет маппинга → [] и без сети",
-          r == [] and opener.calls == 0,
-          f"r={r}, calls={opener.calls}")
+    # a) Нет сопоставления (ни статики, ни в каталоге) → запрос /search не уходит.
+    r = c.lookup_circl("Zzzunknown Daemon", "1.2.3")
+    check("нет маппинга → [] и без запроса /search",
+          r == [] and opener.search_calls == 0,
+          f"r={r}, search_calls={opener.search_calls}")
 
-    # b) Есть маппинг, но нет версии (need_ver=True) → запрос не уходит.
+    # b) Есть статический маппинг, но нет версии (need_ver=True) → /search не уходит.
     _clear_cache()
+    opener2 = _NoSearchOpener()
+    c._http_opener = lambda: opener2
     r = c.lookup_circl("Apache httpd", "")
-    check("маппинг без версии → [] и без сети",
-          r == [] and opener.calls == 0,
-          f"r={r}, calls={opener.calls}")
+    check("маппинг без версии → [] и без запроса /search",
+          r == [] and opener2.search_calls == 0,
+          f"r={r}, search_calls={opener2.search_calls}")
 
 
 # --- 3. Парсинг реального CIRCL-ответа + фильтр по версии ------------------

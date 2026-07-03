@@ -382,6 +382,11 @@ a.sum-link:hover{border-color:var(--accent2);background:#0b2a3a}
 .st-badge.st-gone{background:var(--panel2);color:var(--muted)}
 .st-badge.st-conflict{background:#33280a;color:#fdba74}
 .st-badge.st-bound{background:#0b2a3a;color:#7dd3fc}
+/* v1.6.4 (Правка 1): артефакты обнаружения — не прошли проверку IP. */
+.st-badge.st-artifact{background:#3a1a1f;color:#f3a0a8;border:1px solid #5b2630}
+.subdomains-tbl tbody tr.row-artifact{box-shadow:inset 3px 0 0 #b4404e;opacity:.7;background:rgba(180,64,78,.05)}
+.sum-chip.sum-artifact{background:#3a1a1f;border-color:#5b2630;color:#f3a0a8}
+.row-legend.row-artifact{background:#3a1a1f;color:#f3a0a8}
 .conflict-tag{font-size:10px;color:var(--warn);margin-left:6px;font-weight:600}
 .ip-resolved{color:#7ee2a8;font-weight:600}
 .sub-actions{display:flex;flex-direction:column;gap:6px;min-width:130px}

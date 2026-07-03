@@ -589,7 +589,8 @@ def run_main_scan(target_id, dry_run=False, control=None):
                     control=control, **MAIN_PRESET)
 
 
-def collect_domain_targets(target_id, dns_brute=False, log=None, sink=None):
+def collect_domain_targets(target_id, dns_brute=False, log=None, sink=None,
+                           detail=None):
     """Разведка всех доменов, привязанных к объекту.
 
     Для каждого домена:
@@ -619,7 +620,8 @@ def collect_domain_targets(target_id, dns_brute=False, log=None, sink=None):
 
     _log(f"[dns] Привязано доменов: {len(domains)} — {', '.join(domains)}")
     for domain in domains:
-        res = dns_recon.recon_domain(domain, brute=dns_brute, log=_log)
+        res = dns_recon.recon_domain(domain, brute=dns_brute, log=_log,
+                                     detail=detail)
         lvl = "2-й уровень (apex)" if res["is_apex"] else f"{res['level']}-й уровень"
         _log(f"[dns] {domain}: {lvl}, IP найдено {len(res['ips'])}, "
              f"поддоменов {len(res['subdomains'])}")
@@ -641,10 +643,19 @@ def collect_domain_targets(target_id, dns_brute=False, log=None, sink=None):
                 ip_sources[ip] = (source, domain)
         for ip, fqdn in res["fqdn_by_ip"].items():
             fqdn_by_ip.setdefault(ip, fqdn)
-        # Сохраняем найденные поддомены.
+        # Сохраняем найденные поддомены (v1.6.4 — с признаком артефакта).
+        n_artifacts = 0
         for s in res["subdomains"]:
+            art = int(s.get("is_artifact") or 0)
+            n_artifacts += art
             db.add_subdomain(target_id, s["parent"], s["subdomain"],
-                             ip=s.get("ip"), tool=s.get("tool"))
+                             ip=s.get("ip"), tool=s.get("tool"),
+                             is_artifact=art,
+                             verify_reason=s.get("verify_reason"))
+        if n_artifacts:
+            _log(f"[dns] {domain}: артефактов обнаружения отмечено {n_artifacts} "
+                 f"(не прошли проверку соответствия IP — смещены вниз, "
+                 f"исключены из «Привязать все новые»)")
 
     return sorted(extra_ips), ip_sources, fqdn_by_ip, recon_log
 
@@ -694,12 +705,20 @@ def run_scan(target_id, profile="stealth", ports=None, top_ports=DEFAULT_TOP_POR
         slog.log(msg)
         sink.scan_log_line(msg)
 
+    # —— Детальные sink-и для файл-лога (v1.6.4, Правка 3) ——
+    # Пишут сырой/подробный вывод МОДУЛЕЙ ТОЛЬКО в файл (DEBUG),
+    # не зашумляя консоль. Раньше детально писался только nmap.
+    detail_web = slog.make_detail_sink("webscan")
+    detail_cve = slog.make_detail_sink("cve")
+    detail_dns = slog.make_detail_sink("dns")
+    detail_pre = slog.make_detail_sink("preflight")
+
     slog.section(f"НАЧАЛО СКАНИРОВАНИЯ: {target['name']} ({target['cidr']})")
     log(f"Класс скана: {scan_class}; режим SYN: {syn_mode}; профиль: {profile}")
 
     # —— Проверка наличия утилит (треб. 6) ——
     slog.section("ПРОВЕРКА УТИЛИТ (треб. 6)")
-    pf = preflight.preflight(log=log)
+    pf = preflight.preflight(log=log, detail=detail_pre)
     # Базовые модули: nmap всегда применяется (без него скан падает).
     sink.module("nmap", errorsink.STATUS_USED)
     sink.module("nse", errorsink.STATUS_USED if extra_nse
@@ -745,7 +764,7 @@ def run_scan(target_id, profile="stealth", ports=None, top_ports=DEFAULT_TOP_POR
     # Собираем IP из привязанных доменов и добавляем их к сканированию.
     slog.section("DNS-РАЗВЕДКА ДОМЕНОВ")
     extra_ips, ip_sources, fqdn_by_ip, recon_log = collect_domain_targets(
-        target_id, dns_brute=dns_brute, log=log, sink=sink)
+        target_id, dns_brute=dns_brute, log=log, sink=sink, detail=detail_dns)
     # Статусы DNS-модулей (треб. 2). Если доменов нет — DNS-разведка
     # не выполнялась (нечего разведывать).
     if db.domains_for_target(target_id):
@@ -944,7 +963,8 @@ def run_scan(target_id, profile="stealth", ports=None, top_ports=DEFAULT_TOP_POR
                     scheme = "https" if (wp["port"] in (443, 8443) or
                                          "https" in wp["service"] or
                                          "ssl" in wp["service"]) else "http"
-                    info = webscan.probe_web(h["ip"], wp["port"], scheme)
+                    info = webscan.probe_web(h["ip"], wp["port"], scheme,
+                                             detail=detail_web)
                     if info:
                         db.add_webres(host_id, info["url"], info["status_code"],
                                       info["title"], info["server"], info["tech"])
@@ -959,7 +979,7 @@ def run_scan(target_id, profile="stealth", ports=None, top_ports=DEFAULT_TOP_POR
                                 tech=info.get("tech", ""), heavy=heavy,
                                 log=log, external=is_external,
                                 cve_online=cve_online, cve_vulners=cve_vulners,
-                                ports_info=ports_info)
+                                ports_info=ports_info, detail=detail_web)
                         except Exception as e:  # noqa: BLE001
                             vfindings = []
                             # Через log() — чтобы ошибка попала и в журнал, и в

@@ -212,6 +212,30 @@ class ScanLogger:
         """Совместимость с callback-стилем log('строка') в модулях сканера."""
         self.logger.info("%s", msg)
 
+    def detail(self, module, msg):
+        """Детальная запись ТОЛЬКО в файл лога (v1.6.4, Правка 3).
+
+        Пишется на уровне DEBUG — попадает в FileHandler (DEBUG), но НЕ
+        в консоль (StreamHandler=INFO). Служит для подробного журнала
+        работы ВСЕХ модулей (webscan/cve/dns/preflight), а не только nmap.
+
+        Аргументы:
+            module — короткая метка модуля (напр. 'webscan', 'cve', 'dns');
+            msg    — строка сообщения (может быть многострочной).
+        """
+        tag = f"[{module}] " if module else ""
+        for line in str(msg).splitlines() or [""]:
+            self.logger.debug("%s%s", tag, line)
+
+    def make_detail_sink(self, module):
+        """Фабрика callback-а для передачи в модули (v1.6.4).
+
+        Возвращает функцию detail_log(msg), которая пишет подробности
+        в файл лога с фиксированной меткой модуля. Удобно передавать
+        в функции webscan/cve/dns как отдельный detail-callback.
+        """
+        return lambda msg: self.detail(module, msg)
+
     def tool_output(self, tool, output, level=logging.DEBUG):
         """Записать сырой stdout/stderr утилиты (nmap/whatweb/nikto/...).
 

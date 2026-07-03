@@ -274,6 +274,13 @@ CREATE TABLE IF NOT EXISTS discovered_subdomains (
     bound       INTEGER NOT NULL DEFAULT 0,
     -- present: обнаружен в ПОСЛЕДНЕМ скане (0/1) — для подсветки новых/исчезших.
     present     INTEGER NOT NULL DEFAULT 1,
+    -- v1.6.4 (Правка 1): is_artifact=1 — поддомен НЕ прошёл проверку
+    -- соответствия IP (прямая/обратная) и считается артефактом
+    -- обнаружения (wildcard/catch-all). Смещается вниз таблицы и не
+    -- привязывается кнопкой «Привязать все новые».
+    is_artifact INTEGER NOT NULL DEFAULT 0,
+    -- verify_reason: человекочитаемая причина вердикта проверки.
+    verify_reason TEXT,
     UNIQUE(target_id, subdomain, ip)
 );
 
@@ -409,7 +416,13 @@ def _migrate(c):
                          #            (через запятую), для сводки в столбце «Информация».
                          # auto_resolved — 1, если IP выбран автоматически из конфликта.
                          ("alt_ips", "TEXT"),
-                         ("auto_resolved", "INTEGER NOT NULL DEFAULT 0")):
+                         ("auto_resolved", "INTEGER NOT NULL DEFAULT 0"),
+                         # v1.6.4 (Правка 1): верификация поддоменов по IP.
+                         # is_artifact  — 1, если поддомен не прошёл прямую/
+                         #                обратную проверку соответствия IP.
+                         # verify_reason — человекочитаемая причина вердикта.
+                         ("is_artifact", "INTEGER NOT NULL DEFAULT 0"),
+                         ("verify_reason", "TEXT")):
             if col not in scols:
                 c.execute(f"ALTER TABLE discovered_subdomains ADD COLUMN {col} {ddl}")
 
@@ -603,17 +616,22 @@ def get_ip_origins(target_id):
 
 # ----------------------- discovered_subdomains -----------------------
 
-def add_subdomain(target_id, parent, subdomain, ip=None, tool=None, last_run_id=None):
+def add_subdomain(target_id, parent, subdomain, ip=None, tool=None, last_run_id=None,
+                  is_artifact=0, verify_reason=None):
     """Добавить/обновить найденный поддомен (без дубликатов по имени+IP).
 
     v1.6.0 (треб. 5): ведём provenance — первое/последнее обнаружение,
     инструменты (может быть несколько), агрегированный список утилит.
     Новый поддомен помечается present=1; привязка (bound) не меняется.
+
+    v1.6.4 (Правка 1): is_artifact/verify_reason — результат проверки
+    соответствия IP (прямая/обратная). Обновляются при каждом скане.
     """
     subdomain = (subdomain or "").strip().lower().rstrip(".")
     parent = (parent or "").strip().lower().rstrip(".")
     if not subdomain:
         return
+    is_artifact = 1 if is_artifact else 0
     now = _now()
     with _LOCK, connect() as c:
         existing = c.execute(
@@ -627,29 +645,35 @@ def add_subdomain(target_id, parent, subdomain, ip=None, tool=None, last_run_id=
                 tools.append(tool)
             c.execute(
                 "UPDATE discovered_subdomains SET tool=?, last_run_id=?, "
-                "found_at=?, last_seen=?, last_tool=?, tools=?, present=1 "
+                "found_at=?, last_seen=?, last_tool=?, tools=?, present=1, "
+                "is_artifact=?, verify_reason=? "
                 "WHERE id=?",
                 (tool, last_run_id, now, now, tool, ",".join(tools),
-                 existing["id"]))
+                 is_artifact, verify_reason, existing["id"]))
         else:
             c.execute(
                 "INSERT INTO discovered_subdomains(target_id, parent, subdomain, "
                 "ip, tool, last_run_id, found_at, first_seen, first_tool, "
-                "last_seen, last_tool, tools, present) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,1)",
+                "last_seen, last_tool, tools, present, is_artifact, verify_reason) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,1,?,?)",
                 (target_id, parent, subdomain, ip, tool, last_run_id, now,
-                 now, tool, now, tool, tool or ""))
+                 now, tool, now, tool, tool or "", is_artifact, verify_reason))
         c.commit()
 
 
 def list_subdomains(target_id):
     """Найденные поддомены, отсортированные «по уровням» (требование 1):
     сначала по родительскому домену (по уровням), затем по самому
-    поддомену (тоже по уровням)."""
+    поддомену (тоже по уровням).
+
+    v1.6.4 (Правка 1): артефакты обнаружения (is_artifact=1) смещаются
+    ВНИЗ таблицы — в ключ сортировки первым компонентом идёт
+    is_artifact (0 раньше 1)."""
     with connect() as c:
         rows = [dict(r) for r in c.execute(
             "SELECT * FROM discovered_subdomains WHERE target_id=?", (target_id,))]
-    rows.sort(key=lambda r: (domain_sort_key(r["parent"]),
+    rows.sort(key=lambda r: (int(r.get("is_artifact") or 0),
+                             domain_sort_key(r["parent"]),
                              domain_sort_key(r["subdomain"])))
     return rows
 
@@ -680,12 +704,17 @@ def set_all_subdomains_bound(target_id, bound, only_present=True):
 
     bound=True — привязать НОВЫЕ обнаруженные (present=1) поддомены с IP;
     bound=False — отвязать ИСЧЕЗНУВШИЕ (present=0). Возвращает число изменённых.
+
+    v1.6.4 (Правка 1): при bound=True артефакты обнаружения
+    (is_artifact=1) ИСКЛЮЧАЮТСЯ — кнопка «Привязать все новые»
+    на них не распространяется.
     """
     with _LOCK, connect() as c:
         if bound:
             cur = c.execute(
                 "UPDATE discovered_subdomains SET bound=1 "
-                "WHERE target_id=? AND bound=0 AND ip IS NOT NULL"
+                "WHERE target_id=? AND bound=0 AND ip IS NOT NULL "
+                "AND is_artifact=0"
                 + (" AND present=1" if only_present else ""),
                 (target_id,))
         else:

@@ -432,11 +432,14 @@ def _subdomain_summary(target_id):
     present = [s for s in subs if s.get("present")]
     gone = [s for s in subs if not s.get("present")]
     auto_resolved = [s for s in subs if s.get("auto_resolved")]
+    # v1.6.4 (Правка 1): артефакты обнаружения (не прошли проверку IP).
+    artifacts = [s for s in subs if s.get("is_artifact")]
     return {
         "total": len(subs),
         "present": len(present),
         "gone": len(gone),
         "auto_resolved": len(auto_resolved),
+        "artifacts": len(artifacts),
     }
 
 
