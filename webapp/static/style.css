@@ -97,8 +97,12 @@ body.fullreport-body{margin:0;display:flex;flex-direction:column;min-height:100v
 .fullreport-bar .report-summary{margin:0;flex:1 1 auto}
 .fullreport-actions{display:flex;gap:8px;align-items:center;margin-left:auto}
 .fullreport-main{flex:1 1 auto;padding:8px 16px 24px}
-/* В отдельном окне прокрутка таблицы по высоте окна, sticky-заголовки. */
-.fullreport-main .table-scroll{max-height:calc(100vh - 230px);overflow-y:auto;overflow-x:scroll}
+/* П.8 (v1.6.5): в отдельном окне контейнер .table-scroll прокручивается
+   ПО ОБЕИМ осям (overflow:auto + max-height). Горизонталь и вертикаль
+   работают колесом мыши нативно. Заголовки sticky внутри контейнера
+   (top:0). Раньше вертикаль не работала С КЛАВИАТУРЫ, т.к. обработчик
+   ↑/↓ двигал window вместо контейнера — исправлено в report_full.html. */
+.fullreport-main .table-scroll{max-height:calc(100vh - 210px);overflow:auto}
 .fullreport-main .table-scroll::-webkit-scrollbar{width:14px;height:14px}
 .fullreport-main .tbl.report thead th{position:sticky;top:0;z-index:5}
 /* Заметная и удобная полоса прокрутки (WebKit + Firefox). */
@@ -360,6 +364,13 @@ a.sum-link:hover{border-color:var(--accent2);background:#0b2a3a}
 .history-tbl tbody tr:hover{background:rgba(56,189,248,.06)}
 
 /* Треб. 4: страница сравнения. */
+/* v1.6.5 (доработка 7): селектор эталонного сканирования */
+.cmp-baseline{display:flex;flex-wrap:wrap;align-items:center;gap:10px;
+  margin:6px 0 12px;padding:10px 12px;border:1px solid var(--line);
+  border-radius:10px;background:var(--panel2)}
+.cmp-baseline select{padding:6px 10px;border-radius:8px;border:1px solid var(--line);
+  background:var(--panel);color:var(--txt);font-size:13px;max-width:100%}
+.cmp-baseline .small{margin-left:auto}
 .cmp-legend{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0 14px}
 .cmp-run{font-size:11.5px;padding:4px 11px;border-radius:8px;background:var(--panel2);
   border:1px solid var(--line);color:var(--muted)}
@@ -384,6 +395,8 @@ a.sum-link:hover{border-color:var(--accent2);background:#0b2a3a}
 .st-badge.st-bound{background:#0b2a3a;color:#7dd3fc}
 /* v1.6.4 (Правка 1): артефакты обнаружения — не прошли проверку IP. */
 .st-badge.st-artifact{background:#3a1a1f;color:#f3a0a8;border:1px solid #5b2630}
+/* П.4 (v1.6.5): PTR-пометка — запись валидна, но PTR отсутствует/не совпадает. */
+.st-badge.st-ptr{background:#33280a;color:#fdba74;border:1px solid #5b4410}
 .subdomains-tbl tbody tr.row-artifact{box-shadow:inset 3px 0 0 #b4404e;opacity:.7;background:rgba(180,64,78,.05)}
 .sum-chip.sum-artifact{background:#3a1a1f;border-color:#5b2630;color:#f3a0a8}
 .row-legend.row-artifact{background:#3a1a1f;color:#f3a0a8}
@@ -411,6 +424,13 @@ a.sum-link:hover{border-color:var(--accent2);background:#0b2a3a}
 /* ============ v1.6.1 (правка 1): управление активным сканом ============ */
 /* Кнопки управления в таблице «Текущее сканирование». */
 .btn-sm{padding:3px 9px;font-size:11px;margin-right:5px}
+/* П.12 (v1.6.5): инлайн-значки управления (пауза/продолжить/
+   отмена) — одинаковый размер и выравнивание по центру. Кнопка
+   становится inline-flex, чтобы значок и текст центрировались
+   по вертикали одинаково (глифы ‖ и ✕ имели разные метрики). */
+.scan-controls .btn-sm{display:inline-flex;align-items:center;gap:5px}
+.btn-ico{width:11px;height:11px;flex:0 0 auto;display:block;
+  fill:currentColor;color:inherit;vertical-align:middle}
 .btn-danger{background:transparent;color:var(--danger);border-color:#5b2630}
 .btn-danger:hover{background:#3a1a1f;border-color:var(--danger)}
 .btn-danger:disabled{opacity:.5;cursor:not-allowed}
@@ -431,3 +451,88 @@ a.sum-link:hover{border-color:var(--accent2);background:#0b2a3a}
 .sub-info .info-block{margin:6px 0}
 .sub-info .tool-chips{display:flex;gap:4px;flex-wrap:wrap;margin-top:3px}
 .sub-info .opt-label{font-size:12px;color:var(--muted);font-weight:600}
+
+/* ===== П.11 (v1.6.5): действия над уязвимостями + разбор ===== */
+/* Действия у уязвимости в отчёте */
+.vuln-actions{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
+.vuln-actions .btn.small{margin-left:0}
+.vuln-btn-ok{background:var(--ok)!important;color:#062a12!important;border-color:var(--ok)!important}
+.vuln-btn-err{background:var(--danger)!important;color:#2a0606!important;border-color:var(--danger)!important}
+/* Метки состояния уязвимости */
+.vuln-state-tag{font-size:10px;font-weight:700;padding:1px 6px;border-radius:8px;margin-left:6px;text-transform:uppercase;letter-spacing:.3px}
+.vuln-state-tag.st-hidden{background:#3a2c14;color:var(--warn);border:1px solid var(--warn)}
+.vuln-state-tag.st-accepted{background:#0e2b33;color:var(--accent);border:1px solid var(--accent)}
+.vuln-item.vuln-is-hidden{opacity:.7;border-left:3px solid var(--warn)}
+.vuln-item.vuln-is-accepted{border-left:3px solid var(--accent)}
+/* Бейдж «скрыто: N» в сводке по узлу */
+.vuln-badge.hidden-badge{background:#3a2c14;color:var(--warn);border:1px solid var(--warn)}
+/* Таблица «Разбор уязвимостей» */
+.triage-tbl td{vertical-align:top}
+.triage-row.sev-critical{border-left:3px solid var(--danger)}
+.triage-row.sev-warning{border-left:3px solid var(--warn)}
+.triage-row.sev-info{border-left:3px solid var(--accent2)}
+.triage-comment{width:100%;min-width:160px;background:var(--panel2);color:var(--txt);
+  border:1px solid var(--line);border-radius:6px;padding:5px 7px;font-family:inherit;
+  font-size:12px;resize:vertical}
+.triage-comment:focus{outline:none;border-color:var(--accent)}
+.triage-actions{display:flex;flex-direction:column;gap:6px;align-items:flex-start}
+.triage-actions .btn.small,.triage-actions .triage-inline{margin-left:0}
+.triage-inline{display:inline}
+.triage-detail summary{cursor:pointer;color:var(--muted);font-size:11px}
+.note-status.ok{color:var(--ok)}
+.note-status.err{color:var(--danger)}
+
+/* П.3 (v1.6.5): полоса прогресса фаз в «Текущем сканировании».
+   Сегменты dns/nmap/webscan: пройденные горят, текущая моргает, будущие пустые. */
+.phase-bar{display:flex;gap:4px;flex-wrap:wrap;align-items:center}
+.phase-seg{
+  font-size:11px;line-height:1;padding:4px 8px;border-radius:4px;
+  border:1px solid var(--border,#d0d7de);white-space:nowrap;
+  color:var(--muted,#6b7280);background:transparent;transition:all .25s ease;
+}
+/* Будущие фазы — пустые, приглушённые. */
+.phase-seg.seg-pending{opacity:.5;border-style:dashed}
+/* Пройденные фазы — «горят» (заполнены зелёным). */
+.phase-seg.seg-done{
+  background:#1f7a3d;border-color:#1f7a3d;color:#fff;opacity:1;
+}
+/* Текущая фаза — моргает (жёлто-оранжевая пульсация). */
+.phase-seg.seg-active{
+  background:#d98a00;border-color:#d98a00;color:#fff;opacity:1;
+  animation:netinv-phase-blink 1s ease-in-out infinite;
+}
+@keyframes netinv-phase-blink{
+  0%,100%{opacity:1}
+  50%{opacity:.4}
+}
+
+/* П.5 (v1.6.5): модальное окно результатов запуска (открытие из Истории).
+   П.8: тело окна имеет вертикальную И горизонтальную прокрутку. */
+.modal-overlay{
+  position:fixed;inset:0;z-index:1000;
+  background:rgba(0,0,0,.62);
+  display:flex;align-items:center;justify-content:center;padding:24px;
+}
+.modal-overlay[hidden]{display:none}
+body.modal-open{overflow:hidden}
+.modal-box{
+  background:var(--panel,#161b22);border:1px solid var(--border,#30363d);
+  border-radius:10px;box-shadow:0 12px 48px rgba(0,0,0,.5);
+  width:min(1400px,96vw);max-height:90vh;
+  display:flex;flex-direction:column;overflow:hidden;
+}
+.modal-head{
+  display:flex;align-items:center;justify-content:space-between;gap:12px;
+  padding:14px 20px;border-bottom:1px solid var(--border,#30363d);
+  flex:0 0 auto;
+}
+.modal-title{margin:0;font-size:16px}
+.modal-close{
+  background:transparent;border:none;color:var(--muted,#8b949e);
+  font-size:20px;line-height:1;cursor:pointer;padding:4px 8px;border-radius:6px;
+}
+.modal-close:hover{background:var(--panel2,#21262d);color:var(--fg,#e6edf3)}
+/* П.8: и вертикальная, и горизонтальная прокрутка внутри модалки. */
+.modal-body{
+  padding:16px 20px;overflow:auto;flex:1 1 auto;min-height:0;
+}

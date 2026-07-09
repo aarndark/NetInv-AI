@@ -9,10 +9,10 @@
     <div>
       <h2>Сравнение сканирований ({{ runs|length }})</h2>
       <p class="muted">
-        Эталон — <strong>первый выбранный</strong> запуск:
-        #{{ base_run.id }} от {{ base_run.started_at|fmtdate }}
+        Эталон — запуск #{{ base_run.id }} от {{ base_run.started_at|fmtdate }}
         (<code>{{ base_run.target_name }}</code>).
-        Остальные колонки показывают отличия от эталона по IP и открытым портам.
+        Эталонное сканирование можно выбрать ниже. Остальные колонки
+        показывают отличия от эталона по IP и открытым портам.
       </p>
     </div>
     <div class="report-actions">
@@ -20,6 +20,22 @@
       <a class="btn" href="{{ url_for('history') }}">← К истории</a>
     </div>
   </div>
+
+  {# v1.6.5 (доработка 7): выбор эталонного сканирования прямо в окне #}
+  <form class="cmp-baseline" method="get" action="{{ url_for('compare') }}">
+    <input type="hidden" name="ids" value="{{ ids_str }}">
+    <label for="baseline-select"><strong>Эталонное сканирование:</strong></label>
+    <select id="baseline-select" name="baseline" onchange="this.form.submit()">
+      {% for r in runs %}
+        <option value="{{ r.id }}" {% if r.id == baseline_id %}selected{% endif %}>
+          запуск #{{ r.id }} — {{ r.started_at|fmtdate }}
+          ({% if r.scan_class == 'main' %}основное{% else %}расширенное{% endif %})
+        </option>
+      {% endfor %}
+    </select>
+    <noscript><button class="btn" type="submit">Применить</button></noscript>
+    <span class="muted small">Остальные колонки показывают отличия от выбранного эталона.</span>
+  </form>
 
   {# Легенда выбранных запусков #}
   <div class="cmp-legend">

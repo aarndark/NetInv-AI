@@ -35,6 +35,22 @@ STATE_RUNNING = "running"
 STATE_PAUSED = "paused"
 STATE_CANCELLING = "cancelling"
 
+# П.3 (v1.6.5): фазы сканирования для полосы прогресса в «Текущем».
+# Порядок соответствует ходу run_scan: DNS-разведка → nmap → web-проверки.
+PHASE_DNS = "dns"
+PHASE_NMAP = "nmap"
+PHASE_WEB = "webscan"
+PHASE_DONE = "done"
+# Полный порядок фаз (для отрисовки сегментов слева направо).
+PHASE_ORDER = [PHASE_DNS, PHASE_NMAP, PHASE_WEB]
+# Человекочитаемые метки (RU) для UI.
+PHASE_LABELS = {
+    PHASE_DNS: "DNS-разведка",
+    PHASE_NMAP: "nmap-сканирование",
+    PHASE_WEB: "Web-проверки",
+    PHASE_DONE: "Завершение",
+}
+
 
 class ScanControl:
     """Флаги управления одним активным сканом (потокобезопасно)."""
@@ -47,6 +63,8 @@ class ScanControl:
         self._cancel = threading.Event()
         self._paused_flag = False
         self._procs = []  # активные дочерние процессы (subprocess.Popen)
+        # П.3: текущая фаза скана (для полосы прогресса). None до старта.
+        self._phase = None
 
     # ---- запросы оператора (из веб-потока) ----
 
@@ -87,6 +105,18 @@ class ScanControl:
     def is_paused(self):
         with self._lock:
             return self._paused_flag
+
+    # ---- П.3: фаза скана (для полосы прогресса) ----
+
+    def set_phase(self, phase):
+        """Пометить текущую фазу скана (dns|nmap|webscan|done)."""
+        with self._lock:
+            self._phase = phase
+
+    def phase(self):
+        """Текущая фаза скана (или None, если ещё не начата)."""
+        with self._lock:
+            return self._phase
 
     # ---- точки взаимодействия из сканера ----
 

@@ -340,6 +340,40 @@ CREATE TABLE IF NOT EXISTS vulns (
     created_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- v1.6.5 (П.11): состояние разбора уязвимостей на уровне ОБЪЕКТА (target),
+-- устойчивое между сканами. Ключ vkey = "<ip>|<port>|<cve_id|title>"
+-- (IP + порт + название/CVE) — по нему уязвимость опознаётся в новых сканах.
+--   state='hidden'   — скрыта (принятие риска или ошибка детекции): по
+--                      умолчанию не отображается в таблицах и не учитывается
+--                      в статистике; при повторных сканах скрывается
+--                      автоматически.
+--   state='accepted' — принята в работу: попадает на страницу «Разбор
+--                      уязвимостей».
+-- comment — сохраняемый комментарий аналитика (для accepted).
+-- Снимки полей (ip/port/title/cve_id/severity/detail/...) сохраняются, чтобы
+-- страница «Разбор» и авто-скрытие работали независимо от текущего запуска.
+CREATE TABLE IF NOT EXISTS vuln_states (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    target_id    INTEGER NOT NULL REFERENCES targets(id) ON DELETE CASCADE,
+    vkey         TEXT NOT NULL,
+    state        TEXT NOT NULL DEFAULT 'accepted',   -- hidden | accepted
+    comment      TEXT,
+    ip           TEXT,
+    port         TEXT,
+    title        TEXT,
+    cve_id       TEXT,
+    cvss         TEXT,
+    severity     TEXT,
+    detail       TEXT,
+    recommendation TEXT,
+    tool         TEXT,
+    url          TEXT,
+    log_run_id   INTEGER,                             -- запуск, из которого принята (для «открыть лог»)
+    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(target_id, vkey)
+);
+
 -- Локальные пользователи NetInv для авторизации в web-приложении.
 -- Заводятся install.sh при установке. Доступ разрешён только пользователям,
 -- состоящим в группе 'cpt' (in_cpt=1).
@@ -360,6 +394,7 @@ CREATE INDEX IF NOT EXISTS idx_iporigin_target ON ip_origin(target_id);
 CREATE INDEX IF NOT EXISTS idx_subdomains_target ON discovered_subdomains(target_id);
 CREATE INDEX IF NOT EXISTS idx_ipattrs_target ON ip_attributes(target_id);
 CREATE INDEX IF NOT EXISTS idx_vulns_host ON vulns(host_id);
+CREATE INDEX IF NOT EXISTS idx_vulnstates_target ON vuln_states(target_id);
 CREATE INDEX IF NOT EXISTS idx_scanerrors_run ON scan_errors(run_id);
 CREATE INDEX IF NOT EXISTS idx_scanmodules_run ON scan_modules(run_id);
 """
@@ -725,6 +760,33 @@ def set_all_subdomains_bound(target_id, bound, only_present=True):
                 (target_id,))
         c.commit()
         return cur.rowcount
+
+
+def sync_bound_domains_to_target(target_id):
+    """v1.6.5 (доработка 6): синхронизировать родительские домены
+    привязанных (bound=1) поддоменов в таблицу target_domains, чтобы
+    они отображались в описании объекта и участвовали в будущих
+    сканированиях.
+
+    Берутся уникальные непустые значения parent у привязанных
+    поддоменов, каждый добавляется через add_target_domain
+    (INSERT OR IGNORE — без дубликатов). Возвращает число реально
+    добавленных новых доменов.
+    """
+    with connect() as c:
+        rows = c.execute(
+            "SELECT DISTINCT parent FROM discovered_subdomains "
+            "WHERE target_id=? AND bound=1 AND parent IS NOT NULL "
+            "AND TRIM(parent) <> ''", (target_id,)).fetchall()
+    parents = sorted({(r["parent"] or "").strip().lower().rstrip(".")
+                      for r in rows} - {""})
+    existing = set(domains_for_target(target_id))
+    added = 0
+    for p in parents:
+        if p not in existing:
+            add_target_domain(target_id, p)
+            added += 1
+    return added
 
 
 def resolve_subdomain_ip(target_id, subdomain, resolved_ip, tool="resolve"):
@@ -1393,6 +1455,132 @@ def vuln_severity_counts(run_id):
         else:
             out["info"] = r["n"]
     return out
+
+
+# ----------------------- разбор уязвимостей (v1.6.5, П.11) -----------------------
+
+def vuln_state_key(ip, port, cve_id="", title=""):
+    """Ключ уязвимости для устойчивого скрытия/принятия между сканами.
+
+    П.11: «одна и та же» уязвимость = IP + порт + название/CVE.
+    Если есть CVE — используем его (стабильнее названия), иначе — title.
+    """
+    ip = (ip or "").strip()
+    port = str(port or "").strip()
+    ident = (cve_id or "").strip() or (title or "").strip()
+    return f"{ip}|{port}|{ident}"
+
+
+def get_vuln_states(target_id):
+    """Словарь vkey -> запись состояния для объекта (для быстрого lookup)."""
+    with connect() as c:
+        rows = [dict(r) for r in c.execute(
+            "SELECT * FROM vuln_states WHERE target_id=?", (target_id,))]
+    return {r["vkey"]: r for r in rows}
+
+
+def set_vuln_state(target_id, vkey, state, *, ip="", port="", title="",
+                   cve_id="", cvss="", severity="", detail="",
+                   recommendation="", tool="", url="", log_run_id=None,
+                   comment=None):
+    """Задать/обновить состояние уязвимости (hidden|accepted).
+
+    При повторном вызове обновляет state и снимки полей; comment
+    обновляется только если передан явно (не None).
+    """
+    if state not in ("hidden", "accepted"):
+        raise ValueError("state должен быть 'hidden' или 'accepted'")
+    with _LOCK, connect() as c:
+        exists = c.execute(
+            "SELECT id FROM vuln_states WHERE target_id=? AND vkey=?",
+            (target_id, vkey)).fetchone()
+        if exists:
+            if comment is None:
+                c.execute(
+                    "UPDATE vuln_states SET state=?, ip=?, port=?, title=?, "
+                    "cve_id=?, cvss=?, severity=?, detail=?, recommendation=?, "
+                    "tool=?, url=?, log_run_id=COALESCE(?, log_run_id), "
+                    "updated_at=datetime('now') WHERE target_id=? AND vkey=?",
+                    (state, ip, port, title, cve_id, cvss, severity, detail,
+                     recommendation, tool, url, log_run_id, target_id, vkey))
+            else:
+                c.execute(
+                    "UPDATE vuln_states SET state=?, comment=?, ip=?, port=?, "
+                    "title=?, cve_id=?, cvss=?, severity=?, detail=?, "
+                    "recommendation=?, tool=?, url=?, "
+                    "log_run_id=COALESCE(?, log_run_id), "
+                    "updated_at=datetime('now') WHERE target_id=? AND vkey=?",
+                    (state, comment, ip, port, title, cve_id, cvss, severity,
+                     detail, recommendation, tool, url, log_run_id,
+                     target_id, vkey))
+        else:
+            c.execute(
+                "INSERT INTO vuln_states(target_id, vkey, state, comment, ip, "
+                "port, title, cve_id, cvss, severity, detail, recommendation, "
+                "tool, url, log_run_id) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (target_id, vkey, state, comment or "", ip, port, title, cve_id,
+                 cvss, severity, detail, recommendation, tool, url, log_run_id))
+        c.commit()
+
+
+def set_vuln_comment(target_id, vkey, comment):
+    """Обновить только комментарий принятой уязвимости."""
+    with _LOCK, connect() as c:
+        c.execute(
+            "UPDATE vuln_states SET comment=?, updated_at=datetime('now') "
+            "WHERE target_id=? AND vkey=?", (comment or "", target_id, vkey))
+        c.commit()
+
+
+def clear_vuln_state(target_id, vkey):
+    """Убрать состояние («отменить рассмотрение» / вернуть в обычный вид)."""
+    with _LOCK, connect() as c:
+        c.execute("DELETE FROM vuln_states WHERE target_id=? AND vkey=?",
+                  (target_id, vkey))
+        c.commit()
+
+
+def list_vuln_states(target_id, state=None):
+    """Список состояний объекта (опционально только accepted/hidden)."""
+    q = "SELECT * FROM vuln_states WHERE target_id=?"
+    args = [target_id]
+    if state:
+        q += " AND state=?"
+        args.append(state)
+    q += " ORDER BY updated_at DESC"
+    with connect() as c:
+        return [dict(r) for r in c.execute(q, args)]
+
+
+def list_all_vuln_states(state=None):
+    """П.11: список состояний по ВСЕМ объектам — для страницы «Разбор».
+
+    Добавляет target_name и target_cidr через JOIN.
+    """
+    q = ("SELECT vs.*, t.name AS target_name, t.cidr AS target_cidr "
+         "FROM vuln_states vs JOIN targets t ON t.id = vs.target_id")
+    args = []
+    if state:
+        q += " WHERE vs.state=?"
+        args.append(state)
+    q += " ORDER BY vs.updated_at DESC"
+    with connect() as c:
+        return [dict(r) for r in c.execute(q, args)]
+
+
+def count_accepted_vulns(target_id=None):
+    """Число принятых в работу уязвимостей (для бейджа во вкладке)."""
+    with connect() as c:
+        if target_id is None:
+            r = c.execute(
+                "SELECT COUNT(*) AS n FROM vuln_states WHERE state='accepted'"
+            ).fetchone()
+        else:
+            r = c.execute(
+                "SELECT COUNT(*) AS n FROM vuln_states "
+                "WHERE state='accepted' AND target_id=?", (target_id,)).fetchone()
+    return int(r["n"]) if r else 0
 
 
 # ----------------------- users (авторизация) -----------------------

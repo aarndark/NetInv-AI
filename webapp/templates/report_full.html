@@ -40,14 +40,14 @@
   <main class="fullreport-main">
     <h3 class="section-title live">✅ Гарантированно «живые» хосты ({{ live_rows|length }})</h3>
     {% if live_rows %}
-      {{ report_table(live_rows, tkey='full-live-' ~ scan_class, editable=false) }}
+      {{ report_table(live_rows, tkey='full-live-' ~ scan_class, editable=false, target_id=target.id, show_hidden=show_hidden) }}
     {% else %}
       <p class="muted">Нет хостов с подтверждёнными сервисами.</p>
     {% endif %}
 
     <h3 class="section-title palo">⚠ Возможные артефакты защиты Palo Alto ({{ palo_rows|length }})</h3>
     {% if palo_rows %}
-      {{ report_table(palo_rows, tkey='full-palo-' ~ scan_class, editable=false) }}
+      {{ report_table(palo_rows, tkey='full-palo-' ~ scan_class, editable=false, target_id=target.id, show_hidden=show_hidden) }}
     {% else %}
       <p class="muted">Нет узлов-кандидатов на артефакты Palo Alto.</p>
     {% endif %}
@@ -56,30 +56,37 @@
 
   <script src="{{ url_for('static', filename='table-resize.js') }}"></script>
   <script>
-  // Треб. 1г: прокрутка таблицы стрелками клавиатуры.
-  // Фокусируем контейнер прокрутки под курсором; стрелки/PageUp/Down/Home/End.
+  // Треб. 1г + П.8 (v1.6.5): прокрутка стрелками клавиатуры.
+  // Колесо мыши прокручивает контейнер по обеим осям нативно.
+  // Стрелки: ←/→ — горизонталь, ↑/↓ и PageUp/Down — ВЕРТИКАЛЬ
+  // ВНУТРИ контейнера (было: window — поэтому вертикаль не работала).
   (function () {
+    var hoverSc = null;
     var scrollers = document.querySelectorAll('.table-scroll');
     scrollers.forEach(function (sc) {
       sc.setAttribute('tabindex', '0');  // делаем фокусируемым
-      sc.addEventListener('mouseenter', function () { sc.focus(); });
+      sc.addEventListener('mouseenter', function () { hoverSc = sc; sc.focus(); });
+      sc.addEventListener('mouseleave', function () { if (hoverSc === sc) hoverSc = null; });
     });
+    function active() {
+      // Контейнер под курсором → активный → первый видимый.
+      if (hoverSc) return hoverSc;
+      var a = document.activeElement;
+      if (a && a.classList && a.classList.contains('table-scroll')) return a;
+      return document.querySelector('.table-scroll');
+    }
     document.addEventListener('keydown', function (e) {
-      var sc = document.activeElement;
-      if (!sc || !sc.classList || !sc.classList.contains('table-scroll')) {
-        // если фокус не на контейнере — берём первый видимый
-        sc = document.querySelector('.table-scroll');
-        if (!sc) return;
-      }
+      var sc = active();
+      if (!sc) return;
       var stepX = 80, stepY = 60;
       switch (e.key) {
         case 'ArrowLeft':  sc.scrollLeft -= stepX; e.preventDefault(); break;
         case 'ArrowRight': sc.scrollLeft += stepX; e.preventDefault(); break;
-        case 'ArrowUp':    window.scrollBy(0, -stepY); e.preventDefault(); break;
-        case 'ArrowDown':  window.scrollBy(0, stepY); e.preventDefault(); break;
-        case 'PageUp':     window.scrollBy(0, -window.innerHeight * 0.85); e.preventDefault(); break;
-        case 'PageDown':   window.scrollBy(0, window.innerHeight * 0.85); e.preventDefault(); break;
-        case 'Home':       sc.scrollLeft = 0; e.preventDefault(); break;
+        case 'ArrowUp':    sc.scrollTop  -= stepY; e.preventDefault(); break;
+        case 'ArrowDown':  sc.scrollTop  += stepY; e.preventDefault(); break;
+        case 'PageUp':     sc.scrollTop  -= sc.clientHeight * 0.85; e.preventDefault(); break;
+        case 'PageDown':   sc.scrollTop  += sc.clientHeight * 0.85; e.preventDefault(); break;
+        case 'Home':       sc.scrollLeft = 0; sc.scrollTop = 0; e.preventDefault(); break;
         case 'End':        sc.scrollLeft = sc.scrollWidth; e.preventDefault(); break;
       }
     });

@@ -173,25 +173,29 @@ def reverse_lookup(ip, timeout=RESOLVE_TIMEOUT):
 
 
 def verify_subdomain(subdomain, ip, timeout=RESOLVE_TIMEOUT):
-    """Проверка соответствия поддомена IP — прямая и обратная (v1.6.4).
+    """Проверка соответствия поддомена IP (v1.6.5, П.4).
 
-    Правка 1: поддомены, обнаруженные dnsmap/dnsrecon/dnsenum, проверяем
-    на реальную привязку к IP, чтобы отсеять артефакты обнаружения
-    (wildcard-DNS, «мусорные» ответы, catch-all записи).
+    Поддомены, обнаруженные dnsmap/dnsrecon/dnsenum, проверяем на реальную
+    привязку к IP, чтобы отсеять артефакты обнаружения (wildcard-DNS,
+    «мусорные» ответы, catch-all записи).
 
-    Критерии подтверждения (ПОДТВЕРЖДЁН, is_artifact=0):
-      1. Прямая проверка: имя резолвится и заявленный ip входит в набор
-         прямого резолва имени (A-записи).
-      2. Обратная проверка: PTR для ip указывает на имя, которое совпадает
-         с поддоменом ИЛИ принадлежит тому же apex-домену (родителю).
+    П.4 (v1.6.5): валидность DNS-записи определяется ТОЛЬКО прямым
+    резолвом (forward). Обратная проверка (PTR) больше НЕ влияет на
+    признак артефакта — она носит информационный характер:
 
-    Если IP нет вовсе, ИЛИ прямая проверка не прошла, ИЛИ обратная
-    проверка невозможна/не соответствует — поддомен считается
-    АРТЕФАКТОМ обнаружения (is_artifact=1).
+      • ПОДТВЕРЖДЁН (is_artifact=0): имя резолвится и заявленный ip входит
+        в набор прямого резолва (A-записи).
+      • АРТЕФАКТ (is_artifact=1): IP отсутствует, ИЛИ имя не резолвится
+        (нет A-записи), ИЛИ прямой резолв не содержит заявленный IP.
+
+    PTR (обратная зона) проверяется отдельно и НЕ делает запись артефактом.
+    Отсутствие PTR или несоответствие PTR домену — это лишь пометка
+    (`ptr_note`, `ptr_mismatch=True`), запись остаётся валидной.
 
     Возвращает dict:
         {"is_artifact": 0|1, "forward_ok": bool, "reverse_ok": bool,
-         "reason": str, "ptr": [PTR-имена]}
+         "reason": str, "ptr": [PTR-имена],
+         "ptr_mismatch": bool, "ptr_note": str}
     """
     subdomain = (subdomain or "").strip().lower().rstrip(".")
     ip = (ip or "").strip()
@@ -199,13 +203,16 @@ def verify_subdomain(subdomain, ip, timeout=RESOLVE_TIMEOUT):
     # Нет IP — привязать не к чему, это артефакт обнаружения.
     if not ip or not _IPV4_RE.fullmatch(ip):
         return {"is_artifact": 1, "forward_ok": False, "reverse_ok": False,
-                "reason": "нет IP-адреса", "ptr": []}
+                "reason": "нет IP-адреса", "ptr": [],
+                "ptr_mismatch": False, "ptr_note": ""}
 
-    # 1) Прямая проверка: имя резолвится и содержит заявленный IP.
+    # 1) Прямая проверка (ЕДИНСТВЕННЫЙ критерий валидности, П.4):
+    #    имя резолвится и содержит заявленный IP.
     fwd = resolve_host(subdomain, timeout=timeout)
     forward_ok = ip in fwd
 
-    # 2) Обратная проверка: PTR указывает на имя того же apex-домена.
+    # 2) Обратная проверка (ИНФОРМАЦИОННАЯ, П.4): PTR указывает на имя
+    #    того же apex-домена. НЕ влияет на is_artifact.
     ptr = reverse_lookup(ip, timeout=timeout)
     apex = ".".join(subdomain.split(".")[-2:]) if subdomain else ""
     reverse_ok = False
@@ -217,23 +224,32 @@ def verify_subdomain(subdomain, ip, timeout=RESOLVE_TIMEOUT):
             reverse_ok = True
             break
 
-    if forward_ok and reverse_ok:
-        return {"is_artifact": 0, "forward_ok": True, "reverse_ok": True,
-                "reason": "прямая и обратная проверки пройдены", "ptr": ptr}
+    # Пометка по PTR (не артефакт): отсутствует или не соответствует.
+    ptr_mismatch = not reverse_ok
+    if not ptr:
+        ptr_note = "PTR отсутствует"
+    elif not reverse_ok:
+        ptr_note = (f"PTR ({', '.join(ptr)}) не соответствует "
+                    f"домену {apex or subdomain}")
+    else:
+        ptr_note = ""
 
-    # Формируем человекочитаемую причину для артефакта.
-    if not forward_ok and not fwd:
+    # П.4: артефакт определяется ТОЛЬКО прямым резолвом.
+    if forward_ok:
+        reason = "прямой резолв подтверждает привязку IP (A-запись)"
+        return {"is_artifact": 0, "forward_ok": True, "reverse_ok": reverse_ok,
+                "reason": reason, "ptr": ptr,
+                "ptr_mismatch": ptr_mismatch, "ptr_note": ptr_note}
+
+    # Прямой резолв не прошёл — это артефакт.
+    if not fwd:
         reason = "имя не резолвится (нет A-записи)"
-    elif not forward_ok:
+    else:
         reason = (f"прямой резолв не содержит {ip} "
                   f"(A-записи: {', '.join(fwd) or '—'})")
-    elif not ptr:
-        reason = "обратная зона (PTR) отсутствует"
-    else:
-        reason = (f"PTR ({', '.join(ptr)}) не соответствует "
-                  f"домену {apex or subdomain}")
-    return {"is_artifact": 1, "forward_ok": forward_ok,
-            "reverse_ok": reverse_ok, "reason": reason, "ptr": ptr}
+    return {"is_artifact": 1, "forward_ok": False, "reverse_ok": reverse_ok,
+            "reason": reason, "ptr": ptr,
+            "ptr_mismatch": ptr_mismatch, "ptr_note": ptr_note}
 
 
 # ----------------------- разбор вывода утилит -----------------------
@@ -459,7 +475,15 @@ def recon_domain(domain, brute=False, log=None, detail=None):
             ip = s.get("ip")
             ver = verify_subdomain(s["subdomain"], ip, timeout=RESOLVE_TIMEOUT)
             s["is_artifact"] = ver["is_artifact"]
-            s["verify_reason"] = ver["reason"]
+            # П.4: PTR-несоответствие/отсутствие — пометка, НЕ артефакт.
+            # Для подтверждённых записей добавляем PTR-пометку к причине,
+            # чтобы она была видна в UI без изменения схемы БД.
+            reason = ver["reason"]
+            if not ver["is_artifact"] and ver.get("ptr_note"):
+                reason = f"{reason}; ⚠ {ver['ptr_note']}"
+            s["verify_reason"] = reason
+            s["ptr_mismatch"] = ver.get("ptr_mismatch", False)
+            s["ptr_note"] = ver.get("ptr_note", "")
             if detail:
                 detail(f"[dns_recon] verify {s['subdomain']} → {ip or '—'}: "
                        f"forward_ok={ver.get('forward_ok')}, "

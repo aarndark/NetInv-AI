@@ -52,6 +52,7 @@ import preflight  # noqa: E402
 import cve_lookup  # noqa: E402
 import errorsink  # noqa: E402
 import scancontrol  # noqa: E402
+import appversion  # noqa: E402
 
 
 # Профили таймингов, согласованные с защитой Palo Alto SYN Flood.
@@ -681,6 +682,11 @@ def run_scan(target_id, profile="stealth", ports=None, top_ports=DEFAULT_TOP_POR
         if control is not None:
             control.checkpoint()
 
+    # П.3 (v1.6.5): пометить фазу скана (для полосы прогресса в «Текущем»).
+    def _phase(name):
+        if control is not None:
+            control.set_phase(name)
+
     # Нормализуем имя уровня «инфо» для фильтрации (треб. 6).
     _INFO_SEVERITIES = {"info", "инфо", "informational"}
     db.init_db()
@@ -762,6 +768,7 @@ def run_scan(target_id, profile="stealth", ports=None, top_ports=DEFAULT_TOP_POR
 
     # —— DNS-разведка доменов объекта (до запуска nmap) ——
     # Собираем IP из привязанных доменов и добавляем их к сканированию.
+    _phase(scancontrol.PHASE_DNS)  # П.3: фаза DNS-разведки
     slog.section("DNS-РАЗВЕДКА ДОМЕНОВ")
     extra_ips, ip_sources, fqdn_by_ip, recon_log = collect_domain_targets(
         target_id, dns_brute=dns_brute, log=log, sink=sink, detail=detail_dns)
@@ -866,6 +873,7 @@ def run_scan(target_id, profile="stealth", ports=None, top_ports=DEFAULT_TOP_POR
     except scancontrol.ScanCancelled:
         return _finalize_cancelled(run_id, slog, log, target_id, scan_class)
     # Треб. 7: запуск nmap с ПОТОКОВЫМ выводом в консоль и лог.
+    _phase(scancontrol.PHASE_NMAP)  # П.3: фаза nmap-сканирования
     slog.section("ЗАПУСК NMAP (потоковый вывод, треб. 7)")
     try:
         # Добавляем --stats-every для периодического прогресса в реальном времени.
@@ -903,6 +911,8 @@ def run_scan(target_id, profile="stealth", ports=None, top_ports=DEFAULT_TOP_POR
             log_lines.append(emsg)
 
         anp_hosts = []  # (host_id, ip) узлов alive_no_ports для advanced-проверки
+        if do_web:
+            _phase(scancontrol.PHASE_WEB)  # П.3: фаза web-проверок
         for h in parsed:
             # v1.6.1 (правка 1): отмена в ходе web/CVE-обработки узлов —
             # прерываем цикл между узлами, уже сохранённые данные остаются.
@@ -1035,6 +1045,8 @@ def run_scan(target_id, profile="stealth", ports=None, top_ports=DEFAULT_TOP_POR
     except OSError:
         pass
 
+    # П.3: фаза завершения — прогресс-бар показывает все сегменты пройденными.
+    _phase(scancontrol.PHASE_DONE)
     # Пересчёт состояния узлов и отличий (только в рамках этого класса)
     diff_engine.update_host_states(target_id, run_id, scan_class=scan_class)
 
@@ -1056,6 +1068,11 @@ def main():
     ap = argparse.ArgumentParser(
         description="Инвентаризационный сканер подсети (Kali 2026.1) с учётом "
                     "Palo Alto SYN Flood / SYN Cookies.")
+    # П.2 (v1.6.5): просмотр актуальной установленной версии. Поддерживает
+    # как --version, так и -version (одинарное тире, по просьбе).
+    ap.add_argument("-version", "--version", action="version",
+                    version=appversion.version_string(),
+                    help="Показать версию NetInv и выйти")
     ap.add_argument("--target-id", type=int, help="ID объекта из БД")
     ap.add_argument("--add-target", nargs=2, metavar=("NAME", "CIDR"),
                     help="Добавить объект и выйти")

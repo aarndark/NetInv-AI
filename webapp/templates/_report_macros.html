@@ -5,7 +5,7 @@
 {# Макрос отрисовки таблицы отчёта (используется для обеих секций).
    tkey — ключ таблицы для сохранения ширин колонок (требование 2);
    editable — разрешать ли редактирование Описания/Атрибутов (только в сводном отчёте). #}
-{% macro report_table(section_rows, tkey='report', editable=true) %}
+{% macro report_table(section_rows, tkey='report', editable=true, target_id=none, show_hidden=false) %}
   <div class="table-scroll">
   <table class="tbl report" data-table-key="{{ tkey }}">
     <thead>
@@ -97,21 +97,24 @@
           {% for w in r.web_disp %}<div>{{ w }}</div>{% endfor %}
         </td>
         {# Требование 5: столбец «Уязвимости» с подсветкой по критичности #}
+        {# П.11: у каждой уязвимости — «скрыть» и «копировать» (принять в работу). #}
         <td class="vuln-cell">
           {% if r.vulns %}
             <div class="vuln-summary">
               {% if r.vuln_counts.critical %}<span class="vuln-badge crit" title="Требуют максимально оперативного реагирования">критичные: {{ r.vuln_counts.critical }}</span>{% endif %}
               {% if r.vuln_counts.warning %}<span class="vuln-badge warn">предупр.: {{ r.vuln_counts.warning }}</span>{% endif %}
               {% if r.vuln_counts.info %}<span class="vuln-badge info">инфо: {{ r.vuln_counts.info }}</span>{% endif %}
+              {% if r.vuln_hidden_count %}<span class="vuln-badge hidden-badge" title="Скрытые уязвимости у этого узла">скрыто: {{ r.vuln_hidden_count }}</span>{% endif %}
             </div>
             <details class="vuln-details">
               <summary>подробнее ({{ r.vulns|length }})</summary>
               {% for v in r.vulns %}
-                <div class="vuln-item sev-{{ v.severity }}">
+                <div class="vuln-item sev-{{ v.severity }}{% if v.vstate == 'hidden' %} vuln-is-hidden{% elif v.vstate == 'accepted' %} vuln-is-accepted{% endif %}">
                   <div class="vuln-title">
                     <span class="vuln-dot sev-{{ v.severity }}"></span>
                     {{ v.title }}
                     {% if v.tool %}<span class="hint">[{{ v.tool }}]</span>{% endif %}
+                    {% if v.vstate == 'hidden' %}<span class="vuln-state-tag st-hidden">скрыта</span>{% elif v.vstate == 'accepted' %}<span class="vuln-state-tag st-accepted">в работе</span>{% endif %}
                   </div>
                   {# Треб. 3б: блок CVE — кликабельный идентификатор, CVSS, источник. #}
                   {% if v.cve_id %}
@@ -125,6 +128,33 @@
                   {# Треб. 3а: обоснование выбранного уровня severity. #}
                   {% if v.severity_reason %}<div class="vuln-sevreason"><span class="hint">Обоснование severity:</span> {{ v.severity_reason }}</div>{% endif %}
                   {% if v.recommendation %}<div class="vuln-rec">→ {{ v.recommendation }}</div>{% endif %}
+                  {# П.11: действия по уязвимости (только если известен target_id) #}
+                  {% if target_id %}
+                  <div class="vuln-actions"
+                       data-target-id="{{ target_id }}"
+                       data-vkey="{{ v.vkey }}"
+                       data-ip="{{ r.ip }}"
+                       data-port="{{ v.vport }}"
+                       data-title="{{ v.title }}"
+                       data-cve-id="{{ v.cve_id or '' }}"
+                       data-cvss="{{ v.cvss or '' }}"
+                       data-severity="{{ v.severity or '' }}"
+                       data-detail="{{ v.detail or '' }}"
+                       data-recommendation="{{ v.recommendation or '' }}"
+                       data-tool="{{ v.tool or '' }}"
+                       data-url="{{ v.url or '' }}"
+                       data-run-id="{{ v.run_id or '' }}">
+                    <button type="button" class="btn small vuln-copy"
+                            title="Принять в работу: скопировать в буфер и добавить в «Разбор уязвимостей»">⧉ Копировать</button>
+                    {% if v.vstate == 'hidden' %}
+                      <button type="button" class="btn small vuln-unhide"
+                              title="Вернуть уязвимость в таблицу">↩ Вернуть</button>
+                    {% else %}
+                      <button type="button" class="btn small vuln-hide"
+                              title="Скрыть: принятие риска или ошибка детекции (не показывать и не учитывать)">✕ Скрыть</button>
+                    {% endif %}
+                  </div>
+                  {% endif %}
                 </div>
               {% endfor %}
             </details>

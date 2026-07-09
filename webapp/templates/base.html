@@ -25,6 +25,8 @@
          class="tab {% if active_tab == 'current' %}active{% endif %}">Текущее сканирование{% if running_count %} <span class="tab-badge">{{ running_count }}</span>{% endif %}</a>
       <a href="{{ url_for('history') }}"
          class="tab {% if active_tab == 'history' %}active{% endif %}">История сканирований</a>
+      <a href="{{ url_for('triage') }}"
+         class="tab {% if active_tab == 'triage' %}active{% endif %}">Разбор уязвимостей{% if triage_count %} <span class="tab-badge">{{ triage_count }}</span>{% endif %}</a>
       {% if current_user %}
         <span class="nav-user">👤 {{ current_user }}</span>
         <form method="post" action="{{ url_for('logout') }}" class="nav-logout">
@@ -47,11 +49,13 @@
   </main>
 
   <footer class="footer">
-    <span>NetInv • Kali 2026.1 • nmap -sT/-sV/NSE • учёт Palo Alto SYN Flood / SYN Cookies</span>
+    <span>NetInv{% if app_version %} v{{ app_version }}{% endif %} • Kali 2026.1 • nmap -sT/-sV/NSE • учёт Palo Alto SYN Flood / SYN Cookies</span>
   </footer>
 
   {# Требование 2: настройка ширины колонок перетягиванием #}
   <script src="{{ url_for('static', filename='table-resize.js') }}"></script>
+  {# П.11 (v1.6.5): действия над уязвимостями (скрыть / копировать) #}
+  <script src="{{ url_for('static', filename='vuln-actions.js') }}"></script>
   {% block scripts %}{% endblock %}
 </body>
 </html>

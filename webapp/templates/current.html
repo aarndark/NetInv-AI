@@ -14,7 +14,7 @@
       здесь появятся результаты последнего основного скана.</p>
     <table class="tbl">
       <thead>
-        <tr><th>Объект</th><th>CIDR</th><th>Класс</th><th>Параметры</th><th>Запущено</th><th>Статус</th><th>Управление</th></tr>
+        <tr><th>Объект</th><th>CIDR</th><th>Класс</th><th>Параметры</th><th>Запущено</th><th>Прогресс</th><th>Статус</th><th>Управление</th></tr>
       </thead>
       <tbody id="active-body">
       {% for a in active_list %}
@@ -27,6 +27,12 @@
           </td>
           <td class="muted small">{{ a.label or '—' }}</td>
           <td class="nowrap">{{ a.started_at|fmtdate }}</td>
+          <td class="scan-progress">
+            {# П.3: полоса прогресса из сегментов (dns/nmap/webscan). #}
+            <div class="phase-bar" data-target="{{ a.target_id }}">
+              <span class="muted small">ожидание…</span>
+            </div>
+          </td>
           <td class="scan-state">
             {% if a.state == 'paused' %}
               <span class="badge paused">приостановлено</span>
@@ -37,15 +43,19 @@
             {% endif %}
           </td>
           <td class="scan-controls nowrap">
+            {# П.12 (v1.6.5): значки — инлайн-SVG одинакового размера
+               (14×14, currentColor) в .btn-ico — пауза выровнена по высоте
+               с крестиком отмены (раньше были текстовые глифы ‖/✕ с
+               разными метриками). #}
             <button type="button" class="btn btn-sm ctl-pause"
                     data-target="{{ a.target_id }}"
-                    {% if a.state != 'running' %}style="display:none"{% endif %}>‖ Пауза</button>
+                    {% if a.state != 'running' %}style="display:none"{% endif %}><svg class="btn-ico" viewBox="0 0 14 14" aria-hidden="true"><rect x="3" y="2" width="3" height="10" rx="1"></rect><rect x="8" y="2" width="3" height="10" rx="1"></rect></svg>Пауза</button>
             <button type="button" class="btn btn-sm ctl-resume"
                     data-target="{{ a.target_id }}"
-                    {% if a.state != 'paused' %}style="display:none"{% endif %}>▶ Продолжить</button>
+                    {% if a.state != 'paused' %}style="display:none"{% endif %}><svg class="btn-ico" viewBox="0 0 14 14" aria-hidden="true"><path d="M3 2 L12 7 L3 12 Z"></path></svg>Продолжить</button>
             <button type="button" class="btn btn-sm btn-danger ctl-cancel"
                     data-target="{{ a.target_id }}"
-                    {% if a.state == 'cancelling' %}disabled{% endif %}>✕ Отменить</button>
+                    {% if a.state == 'cancelling' %}disabled{% endif %}><svg class="btn-ico" viewBox="0 0 14 14" aria-hidden="true"><path d="M3 3 L11 11 M11 3 L3 11" stroke="currentColor" stroke-width="2" stroke-linecap="round" fill="none"></path></svg>Отменить</button>
           </td>
         </tr>
       {% endfor %}
@@ -203,6 +213,30 @@
     }
   });
 
+  // П.3: отрисовка полосы прогресса из сегментов фаз.
+  // Пройденные — горят (done), текущая — моргает (active), будущие — пустые (pending).
+  function renderPhaseBar(s, order, labels) {
+    var bar = document.querySelector('.phase-bar[data-target="' + s.target_id + '"]');
+    if (!bar) return;
+    // Если у объекта нет доменов — скрываем сегмент dns.
+    var segs = order.filter(function (p) {
+      return !(p === 'dns' && !s.has_domains);
+    });
+    var phase = s.phase;
+    // Индекс текущей фазы в порядке (done = все пройдены).
+    var curIdx = phase ? segs.indexOf(phase) : -1;
+    var allDone = (phase === 'done');
+    var html = '';
+    segs.forEach(function (p, i) {
+      var cls = 'phase-seg';
+      if (allDone || (curIdx >= 0 && i < curIdx)) { cls += ' seg-done'; }
+      else if (curIdx >= 0 && i === curIdx) { cls += ' seg-active'; }
+      else { cls += ' seg-pending'; }
+      html += '<span class="' + cls + '">' + (labels[p] || p) + '</span>';
+    });
+    bar.innerHTML = html || '<span class="muted small">ожидание…</span>';
+  }
+
   function poll() {
     fetch("{{ url_for('current_status') }}")
       .then(function (r) { return r.json(); })
@@ -211,13 +245,18 @@
           window.location.reload();
           return;
         }
-        // Обновляем состояния без перезагрузки (пауза/отмена).
+        var order = j.phase_order || ['dns', 'nmap', 'webscan'];
+        var labels = j.phase_labels || {};
+        // Обновляем состояния и полосы прогресса без перезагрузки.
         (j.running || []).forEach(function (s) {
           applyState(String(s.target_id), s.state);
+          renderPhaseBar(s, order, labels);
         });
       })
       .catch(function () { /* тихо игнорируем сетевые сбои */ });
   }
+  // П.3: немедленный первый опрос — чтобы полоса отрисовалась без задержки.
+  if (initial > 0) { poll(); }
   setInterval(poll, 5000);
 })();
 </script>

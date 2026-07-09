@@ -1,0 +1,156 @@
+{% extends "base.html" %}
+{% block title %}Разбор уязвимостей — NetInv{% endblock %}
+{% block body_class %}report-page{% endblock %}
+{% block content %}
+
+<section class="card">
+  <div class="report-head">
+    <div>
+      <h2>Разбор уязвимостей</h2>
+      <p class="muted">
+        Уязвимости, принятые в работу (кнопкой «Копировать» в отчёте).
+        По каждой доступны: открыть лог запуска, отменить рассмотрение, скрыть
+        (принятие риска / ошибка детекции), сохраняемый комментарий.
+      </p>
+    </div>
+  </div>
+
+  {% if not items %}
+    <p class="muted">
+      Список пуст. Чтобы принять уязвимость в работу — нажмите «⧉ Копировать»
+      у соответствующей уязвимости на странице отчёта объекта.
+      Информация будет скопирована в буфер обмена и добавлена сюда.
+    </p>
+  {% else %}
+  <div class="table-scroll">
+  <table class="tbl triage-tbl" data-table-key="triage">
+    <thead>
+      <tr>
+        <th>Объект</th>
+        <th>IP : порт</th>
+        <th>Критичность</th>
+        <th>Уязвимость</th>
+        <th>CVE / CVSS</th>
+        <th>Инструмент</th>
+        <th>Комментарий</th>
+        <th>Действия</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for it in items %}
+      <tr class="triage-row sev-{{ it.severity }}">
+        <td class="nowrap">
+          <a href="{{ url_for('report', target_id=it.target_id) }}"
+             title="Открыть отчёт по объекту">{{ it.target_name }}</a>
+          <br><span class="hint"><code>{{ it.target_cidr }}</code></span>
+        </td>
+        <td class="nowrap">
+          <strong>{{ it.ip }}</strong>{% if it.port %}<span class="hint"> : {{ it.port }}</span>{% endif %}
+        </td>
+        <td class="nowrap">
+          <span class="vuln-dot sev-{{ it.severity }}"></span>
+          {% if it.severity == 'critical' %}критичная{% elif it.severity == 'warning' %}предупреждение{% elif it.severity == 'info' %}инфо{% else %}{{ it.severity or '—' }}{% endif %}
+        </td>
+        <td>
+          {{ it.title or '—' }}
+          {% if it.detail %}
+          <details class="triage-detail">
+            <summary>подробнее</summary>
+            <div class="vuln-detail">{{ it.detail }}</div>
+            {% if it.recommendation %}<div class="vuln-rec">→ {{ it.recommendation }}</div>{% endif %}
+            {% if it.url %}<div class="hint">URL: {{ it.url }}</div>{% endif %}
+          </details>
+          {% endif %}
+        </td>
+        <td class="nowrap">
+          {% if it.cve_id %}
+            <a href="https://nvd.nist.gov/vuln/detail/{{ it.cve_id }}"
+               target="_blank" rel="noopener" class="cve-link">{{ it.cve_id }}</a>
+            {% if it.cvss %}<br><span class="cve-cvss">CVSS {{ it.cvss }}</span>{% endif %}
+          {% else %}—{% endif %}
+        </td>
+        <td class="nowrap">{% if it.tool %}<span class="badge">{{ it.tool }}</span>{% else %}—{% endif %}</td>
+        {# Сохраняемое поле комментария (AJAX по потере фокуса). #}
+        <td class="triage-comment-cell">
+          <textarea class="triage-comment" rows="2"
+                    data-target-id="{{ it.target_id }}"
+                    data-vkey="{{ it.vkey }}"
+                    placeholder="Комментарий по разбору…">{{ it.comment or '' }}</textarea>
+          <span class="note-status"></span>
+        </td>
+        {# Действия: открыть лог, отменить рассмотрение, скрыть. #}
+        <td class="triage-actions nowrap">
+          {% if it.log_run_id %}
+            <a class="btn small" href="{{ url_for('view_log', run_id=it.log_run_id) }}"
+               target="_blank" rel="noopener" title="Открыть лог запуска">📄 Лог</a>
+          {% else %}
+            <span class="hint">лог н/д</span>
+          {% endif %}
+          <form method="post" class="triage-inline"
+                action="{{ url_for('vuln_clear', target_id=it.target_id) }}">
+            <input type="hidden" name="vkey" value="{{ it.vkey }}">
+            <button type="submit" class="btn small" title="Убрать из разбора (вернуть в обычный вид)">↩ Отменить</button>
+          </form>
+          <form method="post" class="triage-inline"
+                action="{{ url_for('vuln_hide', target_id=it.target_id) }}">
+            <input type="hidden" name="vkey" value="{{ it.vkey }}">
+            <input type="hidden" name="ip" value="{{ it.ip }}">
+            <input type="hidden" name="port" value="{{ it.port }}">
+            <input type="hidden" name="title" value="{{ it.title }}">
+            <input type="hidden" name="cve_id" value="{{ it.cve_id }}">
+            <input type="hidden" name="cvss" value="{{ it.cvss }}">
+            <input type="hidden" name="severity" value="{{ it.severity }}">
+            <input type="hidden" name="detail" value="{{ it.detail }}">
+            <input type="hidden" name="recommendation" value="{{ it.recommendation }}">
+            <input type="hidden" name="tool" value="{{ it.tool }}">
+            <input type="hidden" name="url" value="{{ it.url }}">
+            <input type="hidden" name="log_run_id" value="{{ it.log_run_id or '' }}">
+            <button type="submit" class="btn small" title="Скрыть (принятие риска / ошибка детекции)">✕ Скрыть</button>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <p class="muted small">
+    Всего принято в работу: <strong>{{ items|length }}</strong>.
+    «Отменить» снимает состояние (уязвимость снова видна в отчёте как обычная).
+    «Скрыть» переводит в скрытые (не отображается и не учитывается в статистике).
+  </p>
+  {% endif %}
+</section>
+
+{# П.11: сохранение комментария по разбору через AJAX (по потере фокуса). #}
+<script>
+document.querySelectorAll('.triage-comment').forEach(function (ta) {
+  var save = function () {
+    var status = ta.parentElement.querySelector('.note-status');
+    var data = new URLSearchParams();
+    data.append('vkey', ta.getAttribute('data-vkey'));
+    data.append('comment', ta.value);
+    if (status) { status.textContent = '…'; status.className = 'note-status'; }
+    fetch('/vuln/' + ta.getAttribute('data-target-id') + '/comment', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'X-Requested-With': 'XMLHttpRequest'
+      },
+      body: data.toString()
+    }).then(function (r) { return r.json(); })
+      .then(function (j) {
+        if (status) {
+          status.textContent = j.ok ? '✓ сохранено' : '✗';
+          status.className = 'note-status ' + (j.ok ? 'ok' : 'err');
+          setTimeout(function () { status.textContent = ''; }, 1600);
+        }
+      })
+      .catch(function () {
+        if (status) { status.textContent = '✗'; status.className = 'note-status err'; }
+      });
+  };
+  ta.addEventListener('change', save);
+});
+</script>
+
+{% endblock %}

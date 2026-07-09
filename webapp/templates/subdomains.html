@@ -80,7 +80,7 @@
       {# Подсветка строк: артефакты (v1.6.4) / актуальные / исчезнувшие. #}
       <tr class="{% if s.is_artifact %}row-artifact{% elif s.present %}row-new{% else %}row-gone{% endif %}">
         <td><code>{{ s.parent }}</code></td>
-        <td><code>{{ s.subdomain }}</code>{% if s.is_artifact %} <span class="st-badge st-artifact" title="{{ s.verify_reason or 'Не прошёл проверку соответствия IP' }}">артефакт</span>{% endif %}</td>
+        <td><code>{{ s.subdomain }}</code>{% if s.is_artifact %} <span class="st-badge st-artifact" title="{{ s.verify_reason or 'Не прошёл проверку соответствия IP' }}">артефакт</span>{% elif s.verify_reason and '⚠' in s.verify_reason %} <span class="st-badge st-ptr" title="{{ s.verify_reason }}">PTR-пометка</span>{% endif %}</td>
         <td>
           {% if s.resolved_ip %}
             <span class="ip-resolved" title="IP подтверждён оператором вручную">{{ s.resolved_ip }}</span>

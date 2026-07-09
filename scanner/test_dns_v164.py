@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Тесты v1.6.4 (Правка 1): верификация поддоменов по IP + артефакты.
+"""Тесты DNS-верификации поддоменов (v1.6.4 → обновлено под П.4 v1.6.5).
+
+П.4 (v1.6.5): валидность DNS-записи — ТОЛЬКО прямой резолв (forward).
+PTR (обратная зона) не влияет на артефакт — только пометка.
 
 Проверяется:
   1. reverse_lookup — валидация IP, graceful [] при отсутствии PTR.
-  2. verify_subdomain — матрица прямая×обратная проверок:
+  2. verify_subdomain — матрица (П.4):
        - нет IP → артефакт;
-       - forward+reverse OK → подтверждён;
+       - forward OK (независимо от PTR) → подтверждён;
        - forward не содержит IP → артефакт;
-       - PTR отсутствует → артефакт;
-       - PTR другого домена → артефакт;
-       - PTR того же apex-домена → подтверждён.
+       - forward OK + PTR отсутствует → подтверждён + ptr_mismatch;
+       - forward OK + PTR чужого домена → подтверждён + ptr_mismatch;
+       - forward OK + PTR того же apex → подтверждён, ptr_mismatch=False.
   3. recon_domain (apex) — поддомены получают is_artifact/verify_reason,
-     только подтверждённые дают IP к сканированию (result['ips']).
+     только подтверждённые (forward) дают IP к сканированию.
 
 Тесты автономны: сеть НЕ дёргается — подменяем resolve_host/reverse_lookup.
 
@@ -92,25 +95,31 @@ def test_verify_matrix():
     stub.install()
     try:
         r = d.verify_subdomain("ok.example.ru", "1.2.3.4")
-        check("forward+reverse OK → подтверждён", r["is_artifact"] == 0, str(r))
+        check("forward OK + PTR сам → подтверждён",
+              r["is_artifact"] == 0 and not r["ptr_mismatch"], str(r))
 
         r = d.verify_subdomain("wrongip.example.ru", "1.2.3.4")
         check("forward не содержит IP → артефакт",
               r["is_artifact"] == 1 and not r["forward_ok"], str(r))
 
+        # П.4: PTR отсутствует, но forward OK → НЕ артефакт, пометка.
         r = d.verify_subdomain("noptr.example.ru", "5.5.5.5")
-        check("PTR отсутствует → артефакт",
-              r["is_artifact"] == 1 and not r["reverse_ok"], str(r))
+        check("forward OK + PTR отсутствует → подтверждён + пометка",
+              r["is_artifact"] == 0 and r["ptr_mismatch"]
+              and r["ptr_note"] == "PTR отсутствует", str(r))
 
+        # П.4: PTR чужого домена, но forward OK → НЕ артефакт, пометка.
         r = d.verify_subdomain("foreign.example.ru", "6.6.6.6")
-        check("PTR другого домена → артефакт",
-              r["is_artifact"] == 1 and not r["reverse_ok"], str(r))
+        check("forward OK + PTR чужой домен → подтверждён + пометка",
+              r["is_artifact"] == 0 and r["ptr_mismatch"]
+              and "не соответствует" in r["ptr_note"], str(r))
 
         # forward содержит IP + PTR указывает на ИНОЕ имя ТОГО ЖЕ apex → OK.
         stub.forward["multi.example.ru"] = ["7.7.7.7"]
         r = d.verify_subdomain("multi.example.ru", "7.7.7.7")
-        check("PTR того же apex → подтверждён",
-              r["is_artifact"] == 0 and r["reverse_ok"], str(r))
+        check("forward OK + PTR того же apex → подтверждён, без пометки",
+              r["is_artifact"] == 0 and r["reverse_ok"]
+              and not r["ptr_mismatch"], str(r))
     finally:
         stub.restore()
 
@@ -121,7 +130,9 @@ def test_recon_domain_artifacts():
         {"parent": "example.ru", "subdomain": "good.example.ru",
          "ip": "1.2.3.4", "tool": "dnsmap"},
         {"parent": "example.ru", "subdomain": "bad.example.ru",
-         "ip": "8.8.8.8", "tool": "dnsrecon"},     # PTR чужой → артефакт
+         "ip": "8.8.8.8", "tool": "dnsrecon"},     # PTR чужой, но forward OK
+        {"parent": "example.ru", "subdomain": "nofwd.example.ru",
+         "ip": "3.3.3.3", "tool": "dnsrecon"},     # forward НЕ содержит IP → артефакт
         {"parent": "example.ru", "subdomain": "noip.example.ru",
          "ip": None, "tool": "dnsmap"},            # нет IP → артефакт
     ]
@@ -130,10 +141,11 @@ def test_recon_domain_artifacts():
             "example.ru": ["1.2.3.4"],
             "good.example.ru": ["1.2.3.4"],
             "bad.example.ru": ["8.8.8.8"],
+            "nofwd.example.ru": ["9.9.9.9"],   # forward не содержит заявл. 3.3.3.3
         },
         reverse={
             "1.2.3.4": ["good.example.ru"],
-            "8.8.8.8": ["dns.google"],   # чужой домен
+            "8.8.8.8": ["dns.google"],   # чужой домен (П.4: лишь пометка)
         },
         subs=subs,
     )
@@ -144,15 +156,22 @@ def test_recon_domain_artifacts():
         check("good → не артефакт",
               by_name["good.example.ru"]["is_artifact"] == 0,
               str(by_name.get("good.example.ru")))
-        check("bad (чужой PTR) → артефакт",
-              by_name["bad.example.ru"]["is_artifact"] == 1,
+        # П.4: forward OK, но PTR чужой → НЕ артефакт, есть PTR-пометка.
+        check("bad (чужой PTR, forward OK) → НЕ артефакт + пометка",
+              by_name["bad.example.ru"]["is_artifact"] == 0
+              and by_name["bad.example.ru"].get("ptr_mismatch")
+              and "⚠" in by_name["bad.example.ru"]["verify_reason"],
               str(by_name.get("bad.example.ru")))
+        check("nofwd (forward не содержит IP) → артефакт",
+              by_name["nofwd.example.ru"]["is_artifact"] == 1,
+              str(by_name.get("nofwd.example.ru")))
         check("noip → артефакт",
               by_name["noip.example.ru"]["is_artifact"] == 1,
               str(by_name.get("noip.example.ru")))
-        # Только подтверждённый good даёт IP к сканированию.
-        check("к сканированию идёт только IP подтверждённого поддомена",
-              "1.2.3.4" in res["ips"] and "8.8.8.8" not in res["ips"],
+        # П.4: IP дают все forward-подтверждённые (good + bad), но НЕ артефакты.
+        check("к сканированию идут forward-подтверждённые IP (good+bad)",
+              "1.2.3.4" in res["ips"] and "8.8.8.8" in res["ips"]
+              and "9.9.9.9" not in res["ips"],
               f"ips={res['ips']}")
     finally:
         stub.restore()

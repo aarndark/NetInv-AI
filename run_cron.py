@@ -14,12 +14,17 @@ import os
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "scanner"))
-import db        # noqa: E402
-import scanner   # noqa: E402
+import db          # noqa: E402
+import scanner     # noqa: E402
+import appversion  # noqa: E402
 
 
 def main():
     ap = argparse.ArgumentParser(description="Прогон всех активных объектов (для cron).")
+    # П.2 (v1.6.5): просмотр актуальной установленной версии.
+    ap.add_argument("-version", "--version", action="version",
+                    version=appversion.version_string(),
+                    help="Показать версию NetInv и выйти")
     ap.add_argument("--main", action="store_true",
                     help="ОСНОВНОЙ скан — фиксированный пресет (обход SYN-защиты, "
                          "balanced, NSE, web, alive_no_ports). Остальные опции "

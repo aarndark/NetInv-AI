@@ -17,7 +17,8 @@
     </p>
   </div>
   {% if rows %}
-    {{ report_table(rows, tkey='run-' ~ run.id, editable=false) }}
+    {# П.11: в режиме запуска target_id берём из run — чтобы работали скрыть/копировать. #}
+    {{ report_table(rows, tkey='run-' ~ run.id, editable=false, target_id=run.target_id, show_hidden=show_hidden) }}
   {% else %}
     <p class="muted">В этом запуске нет сохранённых узлов.</p>
   {% endif %}

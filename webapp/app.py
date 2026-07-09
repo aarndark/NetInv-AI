@@ -29,6 +29,8 @@ import csv
 import datetime as dt
 import functools
 import io
+import logging
+import logging.handlers
 import os
 import re
 import sys
@@ -46,9 +48,61 @@ import diff_engine   # noqa: E402
 import scanner       # noqa: E402
 import cve_lookup    # noqa: E402
 import scancontrol   # noqa: E402
+import appversion    # noqa: E402
+
+
+def _setup_http_logging():
+    """П.9 + П.10 (v1.6.5): логи веб-интерфейса — только в файл, не в консоль.
+
+    * П.9: убираем шумный request-лог werkzeug из консоли
+      (строки вида ``127.0.0.1 - - [..] "GET /history HTTP/1.1" 200 -``).
+    * П.10: направляем их (запросы + ошибки веб-интерфейса) в
+      отдельный файл ``./logs/http.log`` для дебага.
+
+    Каталог логов согласован с остальными логами: NETINV_LOG_DIR,
+    иначе /opt/netinv/logs, иначе <проект>/logs.
+    """
+    log_dir = os.environ.get("NETINV_LOG_DIR") or "/opt/netinv/logs"
+    try:
+        os.makedirs(log_dir, exist_ok=True)
+        _probe = os.path.join(log_dir, ".wtest")
+        with open(_probe, "w") as f:
+            f.write("")
+        os.remove(_probe)
+    except OSError:
+        log_dir = os.path.join(ROOT, "logs")
+        os.makedirs(log_dir, exist_ok=True)
+
+    http_log_path = os.path.join(log_dir, "http.log")
+    handler = logging.handlers.RotatingFileHandler(
+        http_log_path, maxBytes=5 * 1024 * 1024, backupCount=5, encoding="utf-8")
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)s %(levelname)s %(name)s: %(message)s"))
+
+    wlog = logging.getLogger("werkzeug")
+    wlog.handlers.clear()
+    wlog.addHandler(handler)
+    wlog.setLevel(logging.INFO)
+    # П.9: не пропускать записи вверх к root-логгеру (иначе попадут в консоль).
+    wlog.propagate = False
+
+    # Ошибки самого Flask-приложения — тоже в http.log (для дебага).
+    app_log = logging.getLogger("netinv.web")
+    app_log.handlers.clear()
+    app_log.addHandler(handler)
+    app_log.setLevel(logging.INFO)
+    app_log.propagate = False
+    return http_log_path, app_log
+
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("NETINV_SECRET", "change-me-in-prod")
+HTTP_LOG_PATH, WEB_LOG = _setup_http_logging()
+# П.10: ошибки Flask пишутся в тот же http.log.
+for _h in WEB_LOG.handlers:
+    app.logger.addHandler(_h)
+app.logger.setLevel(logging.INFO)
+app.logger.propagate = False
 
 # Реестр текущих фоновых сканов: target_id -> dict(статус).
 # v1.6.0 (треб. 4): вкладка «Текущее сканирование» показывает активный скан.
@@ -256,9 +310,9 @@ def start_main_scan(target_id):
     t = threading.Thread(target=_bg_main_scan, args=(target_id,), daemon=True)
     t.start()
     flash(f"ОСНОВНОЙ скан объекта «{target['name']}» запущен в фоне "
-          f"(пресет: обход SYN-защиты, balanced, NSE, web, alive_no_ports). "
-          f"Обновите страницу результатов через время.", "ok")
-    return redirect(url_for("report", target_id=target_id, scan_class="main"))
+          f"(пресет: обход SYN-защиты, balanced, NSE, web, alive_no_ports).", "ok")
+    # П.1 (v1.6.5): после старта скана — сразу на «Текущее сканирование».
+    return redirect(url_for("current"))
 
 
 @app.route("/scan/advanced/<int:target_id>", methods=["POST"])
@@ -301,9 +355,9 @@ def start_advanced_scan(target_id):
     brute_label = "; brute-force поддоменов вкл." if dns_brute else ""
     anp_label = anp_label + dig_label + brute_label
     flash(f"РАСШИРЕННЫЙ скан объекта «{target['name']}» запущен в фоне "
-          f"(профиль: {profile}, режим: {mode_label}{anp_label}). "
-          f"Обновите страницу результатов через время.", "ok")
-    return redirect(url_for("report", target_id=target_id, scan_class="advanced"))
+          f"(профиль: {profile}, режим: {mode_label}{anp_label}).", "ok")
+    # П.1 (v1.6.5): после старта скана — сразу на «Текущее сканирование».
+    return redirect(url_for("current"))
 
 
 @app.route("/report/<int:target_id>")
@@ -315,7 +369,9 @@ def report(target_id):
     scan_class = request.args.get("scan_class", "main")
     if scan_class not in ("main", "advanced"):
         scan_class = "main"
-    rows = _build_report_rows(target_id, scan_class)
+    # П.11: тумблер «показать скрытые уязвимости».
+    show_hidden = request.args.get("show_hidden") == "1"
+    rows = _build_report_rows(target_id, scan_class, show_hidden=show_hidden)
     # Требование 10: делим результаты на «живые» и возможные артефакты Palo Alto.
     live_rows = [r for r in rows if r["is_live"]]
     palo_rows = [r for r in rows if not r["is_live"]]
@@ -335,7 +391,7 @@ def report(target_id):
                            live_rows=live_rows, palo_rows=palo_rows,
                            rows=rows, runs=runs, scan_class=scan_class,
                            domains=domains, subdomains=subdomains,
-                           summary=summary)
+                           summary=summary, show_hidden=show_hidden)
 
 
 def _report_summary(rows, live_rows, palo_rows):
@@ -370,13 +426,15 @@ def report_full(target_id):
     scan_class = request.args.get("scan_class", "main")
     if scan_class not in ("main", "advanced"):
         scan_class = "main"
-    rows = _build_report_rows(target_id, scan_class)
+    show_hidden = request.args.get("show_hidden") == "1"
+    rows = _build_report_rows(target_id, scan_class, show_hidden=show_hidden)
     live_rows = [r for r in rows if r["is_live"]]
     palo_rows = [r for r in rows if not r["is_live"]]
     summary = _report_summary(rows, live_rows, palo_rows)
     return render_template("report_full.html", target=target,
                            live_rows=live_rows, palo_rows=palo_rows,
-                           rows=rows, scan_class=scan_class, summary=summary)
+                           rows=rows, scan_class=scan_class, summary=summary,
+                           show_hidden=show_hidden)
 
 
 @app.route("/runs")
@@ -504,6 +562,13 @@ def current_status():
     out = []
     for tid, st in active.items():
         ctrl = st.get("control")
+        # П.3: текущая фаза скана (dns/nmap/webscan/done) для прогресс-бара.
+        phase = ctrl.phase() if ctrl is not None else None
+        # П.3: есть ли у объекта домены — если нет, сегмент dns скрывается.
+        try:
+            has_domains = bool(db.domains_for_target(tid))
+        except Exception:  # noqa: BLE001
+            has_domains = False
         out.append({
             "target_id": tid,
             "target_name": (tmap.get(tid) or {}).get("name", f"#{tid}"),
@@ -512,8 +577,17 @@ def current_status():
             "started_at": st.get("started_at"),
             # v1.6.1 (правка 1): текущее состояние для кнопок управления.
             "state": ctrl.state() if ctrl is not None else scancontrol.STATE_RUNNING,
+            # П.3: данные прогресс-бара.
+            "phase": phase,
+            "has_domains": has_domains,
         })
-    return jsonify({"running": out, "count": len(out)})
+    return jsonify({
+        "running": out,
+        "count": len(out),
+        # П.3: порядок и RU-метки фаз для отрисовки полосы.
+        "phase_order": scancontrol.PHASE_ORDER,
+        "phase_labels": scancontrol.PHASE_LABELS,
+    })
 
 
 # --- v1.6.1 (правка 1): управление активным сканом ---
@@ -641,15 +715,23 @@ def _parse_run_ids(raw):
     return ids
 
 
-def _build_compare(run_ids):
+def _build_compare(run_ids, baseline_id=None):
     """Собрать данные сравнения до 5 запусков (треб. 4).
 
-    Эталон = ПЕРВОЕ выбранное. Колонки «Отличия от сканирования
-    <дата>» идут по порядку выбора. Сравнение по IP + списку открытых
-    портов (множества).
+    Эталон = ПЕРВОЕ выбранное по умолчанию. v1.6.5 (доработка 7):
+    эталонное сканирование можно выбрать прямо в окне сравнения —
+    если задан baseline_id и он присутствует среди выбранных, этот
+    запуск ставится первым (нулевой колонкой). Колонки «Отличия от
+    сканирования <дата>» идут по порядку выбора. Сравнение по IP +
+    списку открытых портов (множества).
     """
+    ids = list(run_ids[:5])
+    # v1.6.5 (доработка 7): переставить выбранный эталон в начало.
+    if baseline_id is not None and baseline_id in ids:
+        ids.remove(baseline_id)
+        ids.insert(0, baseline_id)
     runs = []
-    for rid in run_ids[:5]:
+    for rid in ids:
         r = db.get_run_full(rid)
         if r:
             runs.append(r)
@@ -711,12 +793,20 @@ def compare():
     if len(ids) > 5:
         ids = ids[:5]
         flash("Сравнение ограничено 5 запусками — взяты первые 5.", "error")
-    runs, rows = _build_compare(ids)
+    # v1.6.5 (доработка 7): выбор эталонного сканирования прямо в окне.
+    try:
+        baseline_id = int(request.args.get("baseline", ""))
+    except (TypeError, ValueError):
+        baseline_id = None
+    if baseline_id not in ids:
+        baseline_id = ids[0]
+    runs, rows = _build_compare(ids, baseline_id=baseline_id)
     if len(runs) < 2:
         flash("Не удалось найти достаточно запусков для сравнения.", "error")
         return redirect(url_for("history"))
     return render_template("compare.html", runs=runs, rows=rows,
-                           ids_str=",".join(str(i) for i in ids))
+                           ids_str=",".join(str(i) for i in ids),
+                           baseline_id=baseline_id)
 
 
 # ============ v1.6.0 (треб. 5): окно поддоменов ============
@@ -755,13 +845,26 @@ def subdomains_bind(target_id):
     subdomain = (request.form.get("subdomain") or "").strip()
     if action == "bind_one" and subdomain:
         db.set_subdomain_bound(target_id, subdomain, True)
-        flash(f"Поддомен {subdomain} привязан к объекту.", "ok")
+        # v1.6.5 (доработка 6): родительский домен привязанного
+        # поддомена автоматически добавляется в описание объекта
+        # и участвует в будущих сканированиях.
+        added = db.sync_bound_domains_to_target(target_id)
+        msg = f"Поддомен {subdomain} привязан к объекту."
+        if added:
+            msg += f" Добавлено доменов в объект: {added}."
+        flash(msg, "ok")
     elif action == "unbind_one" and subdomain:
         db.set_subdomain_bound(target_id, subdomain, False)
         flash(f"Поддомен {subdomain} отвязан от объекта.", "ok")
     elif action == "bind_all_new":
         n = db.set_all_subdomains_bound(target_id, True, only_present=True)
-        flash(f"Привязано новых поддоменов с IP: {n}.", "ok")
+        # v1.6.5 (доработка 6): все родительские домены привязанных
+        # поддоменов синхронизируются в target_domains.
+        added = db.sync_bound_domains_to_target(target_id)
+        msg = f"Привязано новых поддоменов с IP: {n}."
+        if added:
+            msg += f" Добавлено доменов в объект: {added}."
+        flash(msg, "ok")
     elif action == "unbind_all_gone":
         n = db.set_all_subdomains_bound(target_id, False, only_present=True)
         flash(f"Отвязано исчезнувших поддоменов: {n}.", "ok")
@@ -807,6 +910,97 @@ def view_log(run_id):
         flash(f"Не удалось прочитать лог: {e}", "error")
         return redirect(request.referrer or url_for("history"))
     return Response(data, mimetype="text/plain; charset=utf-8")
+
+
+# ----------------------- П.11: разбор уязвимостей -----------------------
+
+@app.route("/triage")
+@login_required
+def triage():
+    """П.11: страница «Разбор уязвимостей» — таблица принятых в работу.
+
+    Показывает уязвимости со состоянием 'accepted' по всем объектам.
+    Опции по каждой: открыть лог, отменить рассмотрение, скрыть, комментарий.
+    """
+    items = db.list_all_vuln_states(state="accepted")
+    return render_template("triage.html", items=items, active_tab="triage")
+
+
+def _vuln_state_fields():
+    """П.11: собрать снимок полей уязвимости из POST-формы."""
+    f = request.form
+    log_run_id = f.get("log_run_id") or None
+    try:
+        log_run_id = int(log_run_id) if log_run_id else None
+    except (ValueError, TypeError):
+        log_run_id = None
+    return {
+        "ip": f.get("ip", ""),
+        "port": f.get("port", ""),
+        "title": f.get("title", ""),
+        "cve_id": f.get("cve_id", ""),
+        "cvss": f.get("cvss", ""),
+        "severity": f.get("severity", ""),
+        "detail": f.get("detail", ""),
+        "recommendation": f.get("recommendation", ""),
+        "tool": f.get("tool", ""),
+        "url": f.get("url", ""),
+        "log_run_id": log_run_id,
+    }
+
+
+@app.route("/vuln/<int:target_id>/hide", methods=["POST"])
+@login_required
+def vuln_hide(target_id):
+    """П.11: скрыть уязвимость (принятие риска / ошибка детекции)."""
+    vkey = request.form.get("vkey", "").strip()
+    if not vkey:
+        return _vuln_resp(False, "Не указан ключ уязвимости")
+    db.set_vuln_state(target_id, vkey, "hidden", **_vuln_state_fields())
+    return _vuln_resp(True, "Уязвимость скрыта")
+
+
+@app.route("/vuln/<int:target_id>/accept", methods=["POST"])
+@login_required
+def vuln_accept(target_id):
+    """П.11: принять уязвимость в работу (попадает в «Разбор»)."""
+    vkey = request.form.get("vkey", "").strip()
+    if not vkey:
+        return _vuln_resp(False, "Не указан ключ уязвимости")
+    db.set_vuln_state(target_id, vkey, "accepted", **_vuln_state_fields())
+    return _vuln_resp(True, "Уязвимость принята в работу")
+
+
+@app.route("/vuln/<int:target_id>/clear", methods=["POST"])
+@login_required
+def vuln_clear(target_id):
+    """П.11: отменить рассмотрение / снять состояние."""
+    vkey = request.form.get("vkey", "").strip()
+    if not vkey:
+        return _vuln_resp(False, "Не указан ключ уязвимости")
+    db.clear_vuln_state(target_id, vkey)
+    return _vuln_resp(True, "Состояние снято")
+
+
+@app.route("/vuln/<int:target_id>/comment", methods=["POST"])
+@login_required
+def vuln_comment(target_id):
+    """П.11: сохранить комментарий к принятой уязвимости."""
+    vkey = request.form.get("vkey", "").strip()
+    if not vkey:
+        return _vuln_resp(False, "Не указан ключ уязвимости")
+    db.set_vuln_comment(target_id, vkey, request.form.get("comment", ""))
+    return _vuln_resp(True, "Комментарий сохранён")
+
+
+def _vuln_resp(ok, msg):
+    """П.11: единый ответ для AJAX (JSON) и обычных форм (redirect с flash)."""
+    wants_json = (request.headers.get("X-Requested-With") == "XMLHttpRequest"
+                  or "application/json" in (request.headers.get("Accept") or ""))
+    if wants_json:
+        return jsonify({"ok": ok, "message": msg})
+    flash(msg, "info" if ok else "error")
+    return redirect(request.referrer or url_for("index"))
 
 
 @app.route("/report/<int:target_id>.csv")
@@ -1027,8 +1221,11 @@ def run_rows(run_id):
     if not run:
         abort(404)
     target = db.get_target(run["target_id"])
+    # П.11: тумблер «показать скрытые» прокидываем через run.
+    run["_show_hidden"] = request.args.get("show_hidden") == "1"
     rows = _build_run_rows(run)
-    return render_template("_run_rows.html", rows=rows, run=run, target=target)
+    return render_template("_run_rows.html", rows=rows, run=run, target=target,
+                           show_hidden=run["_show_hidden"])
 
 
 def _build_run_rows(run):
@@ -1036,18 +1233,22 @@ def _build_run_rows(run):
     Используется для подгрузки результатов из истории (требование 3)."""
     target_id = run["target_id"]
     run_id = run["id"]
+    show_hidden = bool(run.get("_show_hidden"))  # П.11: прокидывается через run
     notes = db.get_ip_notes(target_id)
     attrs = db.get_ip_attributes(target_id)
     origins = db.get_ip_origins(target_id)
+    vstates = db.get_vuln_states(target_id)  # П.11: состояния скрытия/принятия
     rows = []
     for host in db.hosts_for_run(run_id):
         ip = host["ip"]
         ports_disp, services_disp, web_disp = [], [], []
-        vulns, vuln_counts = [], {"critical": 0, "warning": 0, "info": 0}
+        # П.11: прикрепляем vkey/vstate, скрытые по умолчанию не показываем.
+        raw_vulns = []
         for v in db.vulns_for_host(host["id"]):
-            vulns.append(v)
-            vuln_counts[v.get("severity", "info")] = \
-                vuln_counts.get(v.get("severity", "info"), 0) + 1
+            v["run_id"] = run_id
+            raw_vulns.append(v)
+        vulns, vuln_counts, hidden_count = _apply_vuln_states(
+            raw_vulns, ip, target_id, vstates, show_hidden=show_hidden)
         for p in db.ports_for_host(host["id"]):
             conf = p.get("confidence", "")
             tag = "" if conf == "confirmed" else f" [{conf}]"
@@ -1091,6 +1292,7 @@ def _build_run_rows(run):
             "vulns": vulns,
             "vuln_counts": vuln_counts,
             "vuln_max": vuln_max,
+            "vuln_hidden_count": hidden_count,  # П.11
             "alive_no_ports": bool(host.get("alive_no_ports")),
             "advanced_note": host.get("advanced_note") or "",
             "source": src,
@@ -1102,19 +1304,71 @@ def _build_run_rows(run):
 
 # ----------------------- сборка строк отчёта -----------------------
 
-def _build_report_rows(target_id, scan_class="main"):
+def _vuln_port(v):
+    """П.11: вытащить порт для ключа уязвимости из url (если есть).
+
+    Ключ = IP + порт + название/CVE. Порт берём из URL вида
+    http://host:8080/... — явный порт; иначе 80/443 по схеме; иначе пусто.
+    """
+    url = (v.get("url") or "").strip()
+    if not url:
+        return ""
+    m = re.search(r"://[^/:]+:(\d+)", url)
+    if m:
+        return m.group(1)
+    if url.startswith("https://"):
+        return "443"
+    if url.startswith("http://"):
+        return "80"
+    return ""
+
+
+def _apply_vuln_states(vulns, ip, target_id, states_map, show_hidden=False):
+    """П.11: прикрепить vkey/состояние, отфильтровать скрытые и пересчитать счётчики.
+
+    Возвращает (visible_vulns, counts, hidden_count):
+      * каждой уязвимости добавляются vkey, vstate ('hidden'|'accepted'|'');
+      * скрытые (state='hidden') исключаются из списка и счётчиков,
+        если show_hidden=False (П.11: по умолчанию скрыты);
+      * при show_hidden=True скрытые показываются и учитываются.
+    """
+    visible = []
+    counts = {"critical": 0, "warning": 0, "info": 0}
+    hidden_count = 0
+    for v in vulns:
+        port = _vuln_port(v)
+        vkey = db.vuln_state_key(ip, port, v.get("cve_id") or "",
+                                 v.get("title") or "")
+        strec = states_map.get(vkey)
+        vstate = strec["state"] if strec else ""
+        v["vkey"] = vkey
+        v["vport"] = port
+        v["vstate"] = vstate
+        if vstate == "hidden":
+            hidden_count += 1
+            if not show_hidden:
+                continue
+        visible.append(v)
+        sev = v.get("severity", "info")
+        counts[sev] = counts.get(sev, 0) + 1
+    return visible, counts, hidden_count
+
+
+def _build_report_rows(target_id, scan_class="main", show_hidden=False):
     """Собрать строки итоговой таблицы по последнему запуску каждого IP
     в рамках класса сканирования scan_class."""
     states = db.report_rows(target_id, scan_class)
     notes = db.get_ip_notes(target_id)
     attrs = db.get_ip_attributes(target_id)  # {ip: {admins, ctrl_*}}
     origins = db.get_ip_origins(target_id)   # {ip: {'source':..., 'domain':...}}
+    vstates = db.get_vuln_states(target_id)  # П.11: состояния скрытия/принятия
     rows = []
     for st in states:
         last_run = st.get("last_run_id")
         ports_disp, services_disp, web_disp = [], [], []
         vulns = []
         vuln_counts = {"critical": 0, "warning": 0, "info": 0}
+        hidden_count = 0
         hostname = ""
         alive_no_ports = False
         advanced_note = ""
@@ -1125,13 +1379,17 @@ def _build_report_rows(target_id, scan_class="main"):
                 hostname = host.get("hostname") or ""
                 alive_no_ports = bool(host.get("alive_no_ports"))
                 advanced_note = host.get("advanced_note") or ""
+                raw_vulns = []
                 for v in db.vulns_for_host(host["id"]):
                     # Треб. 3б: кликабельная ссылка NVD для CVE-находок.
                     if v.get("cve_id"):
                         v["nvd_url"] = cve_lookup.nvd_link(v["cve_id"])
-                    vulns.append(v)
-                    sev = v.get("severity", "info")
-                    vuln_counts[sev] = vuln_counts.get(sev, 0) + 1
+                    v["run_id"] = last_run  # П.11: для «открыть лог» при принятии
+                    raw_vulns.append(v)
+                # П.11: скрытые уязвимости по умолчанию не показываем и не считаем.
+                vulns, vuln_counts, hidden_count = _apply_vuln_states(
+                    raw_vulns, st["ip"], target_id, vstates,
+                    show_hidden=show_hidden)
                 for p in db.ports_for_host(host["id"]):
                     conf = p.get("confidence", "")
                     if conf == "confirmed":
@@ -1204,6 +1462,7 @@ def _build_report_rows(target_id, scan_class="main"):
             "vulns": vulns,
             "vuln_counts": vuln_counts,
             "vuln_max": vuln_max,
+            "vuln_hidden_count": hidden_count,  # П.11: число скрытых у этого IP
             "presence": presence,
             "is_live": is_live,
             "source": src,
@@ -1331,8 +1590,16 @@ def modstatus(status):
 @app.context_processor
 def inject_user():
     # v1.6.0 (треб. 4): список активных сканов — для индикатора во вкладках.
+    # П.2 (v1.6.5): номер версии — в footer.
+    # П.11 (v1.6.5): счётчик принятых уязвимостей — бейдж на вкладке «Разбор».
+    try:
+        triage_count = db.count_accepted_vulns()
+    except Exception:  # noqa: BLE001
+        triage_count = 0
     return {"current_user": session.get("user"),
-            "running_count": len(_running_all())}
+            "running_count": len(_running_all()),
+            "triage_count": triage_count,
+            "app_version": appversion.get_version()}
 
 
 if __name__ == "__main__":
