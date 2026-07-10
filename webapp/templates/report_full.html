@@ -10,7 +10,7 @@
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body class="fullreport-body">
-  {% from "_report_macros.html" import report_table %}
+  {% from "_report_macros.html" import report_table, report_editing_script %}
 
   <header class="fullreport-bar">
     <div class="fullreport-title">
@@ -40,14 +40,14 @@
   <main class="fullreport-main">
     <h3 class="section-title live">✅ Гарантированно «живые» хосты ({{ live_rows|length }})</h3>
     {% if live_rows %}
-      {{ report_table(live_rows, tkey='full-live-' ~ scan_class, editable=false, target_id=target.id, show_hidden=show_hidden) }}
+      {{ report_table(live_rows, tkey='full-live-' ~ scan_class, target_id=target.id, show_hidden=show_hidden) }}
     {% else %}
       <p class="muted">Нет хостов с подтверждёнными сервисами.</p>
     {% endif %}
 
     <h3 class="section-title palo">⚠ Возможные артефакты защиты Palo Alto ({{ palo_rows|length }})</h3>
     {% if palo_rows %}
-      {{ report_table(palo_rows, tkey='full-palo-' ~ scan_class, editable=false, target_id=target.id, show_hidden=show_hidden) }}
+      {{ report_table(palo_rows, tkey='full-palo-' ~ scan_class, target_id=target.id, show_hidden=show_hidden) }}
     {% else %}
       <p class="muted">Нет узлов-кандидатов на артефакты Palo Alto.</p>
     {% endif %}
@@ -55,6 +55,8 @@
   {% endif %}
 
   <script src="{{ url_for('static', filename='table-resize.js') }}"></script>
+  <script src="{{ url_for('static', filename='vuln-actions.js') }}"></script>
+  {{ report_editing_script(target.id) }}
   <script>
   // Треб. 1г + П.8 (v1.6.5): прокрутка стрелками клавиатуры.
   // Колесо мыши прокручивает контейнер по обеим осям нативно.

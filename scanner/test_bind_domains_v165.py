@@ -1,6 +1,14 @@
-"""Тест доработки 6 (v1.6.5): при привязке поддомена его родительский
-домен автоматически добавляется в target_domains и виден в описании
-объекта.
+"""Тест доработки 6 (v1.6.5) + исправление бага 1 (v1.6.7): при привязке
+поддомена он сам (FQDN) и его родительский домен добавляются в
+target_domains и видны в столбце «Домены» на странице «Объекты
+сканирования».
+
+v1.6.7: реальный сценарий — родительский домен УЖЕ привязан к объекту
+ДО обнаружения поддоменов (иначе разведка поддоменов вообще не
+запустится, см. collect_domain_targets/domains_for_target). В этом
+случае старая версия sync_bound_domains_to_target синхронизировала
+только parent (который уже есть) и реально ничего не добавляла —
+именно это и было причиной бага «список доменов не обновляется».
 
 Использует временную БД (NETINV_DB) во временном каталоге.
 """
@@ -35,39 +43,62 @@ def main():
 
     tid = db.add_target("Тест", "192.168.56.0/24", "desc")
 
-    # Три поддомена под двумя родительскими доменами.
+    # --- Сценарий 1 (искусственный, как раньше): поддомены без заранее
+    # привязанного родителя. ---
     db.add_subdomain(tid, "example.ru", "www.example.ru", ip="10.0.0.1", tool="dnsrecon")
     db.add_subdomain(tid, "example.ru", "mail.example.ru", ip="10.0.0.2", tool="dnsrecon")
     db.add_subdomain(tid, "corp.local", "vpn.corp.local", ip="10.0.0.3", tool="dnsmap")
 
-    # До привязки — доменов в объекте нет.
     chk("до привязки target_domains пуст", db.domains_for_target(tid) == [])
 
-    # Привязать один поддомен → появляется его родитель.
+    # Привязать один поддомен → появляется сам FQDN и его родитель.
     db.set_subdomain_bound(tid, "www.example.ru", True)
     added = db.sync_bound_domains_to_target(tid)
-    chk("bind_one добавил 1 домен", added == 1)
-    chk("example.ru в описании объекта", "example.ru" in db.domains_for_target(tid))
-    chk("corp.local ещё НЕ добавлен", "corp.local" not in db.domains_for_target(tid))
+    chk("bind_one добавил 2 домена (FQDN + parent)", added == 2)
+    chk("www.example.ru в списке доменов объекта",
+        "www.example.ru" in db.domains_for_target(tid))
+    chk("example.ru (parent) в списке доменов объекта",
+        "example.ru" in db.domains_for_target(tid))
+    chk("corp.local/vpn.corp.local ещё НЕ добавлены",
+        {"corp.local", "vpn.corp.local"}.isdisjoint(db.domains_for_target(tid)))
 
     # Повторная синхронизация не создаёт дубликатов.
     added2 = db.sync_bound_domains_to_target(tid)
     chk("повторная синхронизация не добавляет дубликатов", added2 == 0)
-    chk("example.ru встречается один раз",
-        db.domains_for_target(tid).count("example.ru") == 1)
+    chk("www.example.ru встречается один раз",
+        db.domains_for_target(tid).count("www.example.ru") == 1)
 
-    # Привязать все новые → появляется второй родитель.
+    # Привязать все новые → появляется второй поддомен + его родитель.
     n = db.set_all_subdomains_bound(tid, True, only_present=True)
     added3 = db.sync_bound_domains_to_target(tid)
     doms = set(db.domains_for_target(tid))
-    chk("после bind_all оба родителя присутствуют",
-        {"example.ru", "corp.local"} <= doms)
-    chk("bind_all добавил ровно 1 новый домен (corp.local)", added3 == 1)
+    chk("после bind_all все FQDN и родители присутствуют",
+        {"example.ru", "corp.local", "www.example.ru",
+         "mail.example.ru", "vpn.corp.local"} <= doms)
+    # mail.example.ru (родитель example.ru уже есть) + corp.local + vpn.corp.local = 3
+    chk("bind_all добавил ровно 3 новых домена", added3 == 3)
 
     # list_target_domains должен вернуть эти домены (для index.html).
     ltd = [d["domain"] for d in db.list_target_domains(tid)]
-    chk("list_target_domains содержит оба домена",
-        {"example.ru", "corp.local"} <= set(ltd))
+    chk("list_target_domains содержит все домены",
+        {"example.ru", "corp.local", "www.example.ru",
+         "mail.example.ru", "vpn.corp.local"} <= set(ltd))
+
+    # --- Сценарий 2 (реальный, v1.6.7): родитель уже привязан к объекту
+    # ДО обнаружения поддоменов — воспроизводит настоящий баг 1. ---
+    tid2 = db.add_target("Тест2", "10.20.30.0/24", "desc2")
+    db.add_target_domain(tid2, "acme.test")  # пользователь привязал домен вручную
+    chk("acme.test уже в target_domains до разведки",
+        "acme.test" in db.domains_for_target(tid2))
+
+    # DNS-разведка нашла новый поддомен под уже привязанным доменом.
+    db.add_subdomain(tid2, "acme.test", "host1.acme.test", ip="10.20.30.5", tool="dnsrecon")
+    db.set_subdomain_bound(tid2, "host1.acme.test", True)
+    added4 = db.sync_bound_domains_to_target(tid2)
+    chk("баг 1 воспроизведён и исправлен: FQDN поддомена добавлен "
+        "(a не только уже существующий parent)",
+        added4 == 1 and "host1.acme.test" in db.domains_for_target(tid2))
+    chk("acme.test не задублирован", db.domains_for_target(tid2).count("acme.test") == 1)
 
     failed = [n for n, ok in checks if not ok]
     print()

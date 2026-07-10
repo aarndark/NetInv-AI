@@ -177,3 +177,90 @@
   </table>
   </div>
 {% endmacro %}
+
+{# Баг 3 (v1.6.7): скрипт сохранения «Описания»/«Администраторов»/«Контроль и
+   защита» по IP через AJAX. Раньше был только инлайн-скриптом в report.html,
+   из-за чего на /current и в «Открыть в отдельном окне» поля были нередактируемы
+   (или редактируемы, но без обработчиков). Вынесен в общий макрос, чтобы
+   переиспользовать везде, где рендерится report_table с editable=true. #}
+{% macro report_editing_script(target_id) %}
+{% if target_id %}
+<script>
+document.querySelectorAll('.note-input').forEach(function (inp) {
+  var saveNote = function () {
+    var ip = inp.getAttribute('data-ip');
+    var status = inp.parentElement.querySelector('.note-status');
+    var data = new URLSearchParams();
+    data.append('ip', ip);
+    data.append('note', inp.value);
+    status.textContent = '…';
+    fetch("{{ url_for('set_note', target_id=target_id) }}", {
+      method: 'POST',
+      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+      body: data.toString()
+    }).then(function (resp) { return resp.json(); })
+      .then(function (j) {
+        status.textContent = j.ok ? '✓' : '✗';
+        status.className = 'note-status ' + (j.ok ? 'ok' : 'err');
+        setTimeout(function () { status.textContent = ''; }, 1500);
+      })
+      .catch(function () {
+        status.textContent = '✗';
+        status.className = 'note-status err';
+      });
+  };
+  // Сохраняем при потере фокуса и по Enter
+  inp.addEventListener('change', saveNote);
+  inp.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') { e.preventDefault(); inp.blur(); }
+  });
+});
+
+// Требование 4: общий помощник сохранения атрибутов IP (Администраторы / флаги).
+function netinvSaveAttr(ip, field, value, statusEl) {
+  var data = new URLSearchParams();
+  data.append('ip', ip);
+  data.append(field, value);
+  if (statusEl) { statusEl.textContent = '…'; statusEl.className = 'note-status'; }
+  return fetch("{{ url_for('set_attrs', target_id=target_id) }}", {
+    method: 'POST',
+    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+    body: data.toString()
+  }).then(function (resp) { return resp.json(); })
+    .then(function (j) {
+      if (statusEl) {
+        statusEl.textContent = j.ok ? '✓' : '✗';
+        statusEl.className = 'note-status ' + (j.ok ? 'ok' : 'err');
+        setTimeout(function () { statusEl.textContent = ''; }, 1500);
+      }
+    })
+    .catch(function () {
+      if (statusEl) { statusEl.textContent = '✗'; statusEl.className = 'note-status err'; }
+    });
+}
+
+// Требование 4: поле «Администраторы» (редактируемый текст, AJAX).
+document.querySelectorAll('.admins-input').forEach(function (inp) {
+  var save = function () {
+    var status = inp.parentElement.querySelector('.note-status');
+    netinvSaveAttr(inp.getAttribute('data-ip'), 'admins', inp.value, status);
+  };
+  inp.addEventListener('change', save);
+  inp.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') { e.preventDefault(); inp.blur(); }
+  });
+});
+
+// Требование 4: галочки «Контроль и защита» (CPT/SOC/сканер/WAF/DDOS, AJAX).
+document.querySelectorAll('.ctrl-input').forEach(function (chk) {
+  chk.addEventListener('change', function () {
+    var cell = chk.closest('.ctrl-cell');
+    var status = cell ? cell.querySelector('.note-status') : null;
+    netinvSaveAttr(chk.getAttribute('data-ip'),
+                   chk.getAttribute('data-flag'),
+                   chk.checked ? '1' : '0', status);
+  });
+});
+</script>
+{% endif %}
+{% endmacro %}

@@ -772,28 +772,42 @@ def set_all_subdomains_bound(target_id, bound, only_present=True):
 
 
 def sync_bound_domains_to_target(target_id):
-    """v1.6.5 (доработка 6): синхронизировать родительские домены
-    привязанных (bound=1) поддоменов в таблицу target_domains, чтобы
-    они отображались в описании объекта и участвовали в будущих
-    сканированиях.
+    """v1.6.5 (доработка 6, исторически) / v1.6.7 (испр. бага 1):
+    синхронизировать привязанные (bound=1) поддомены в таблицу
+    target_domains, чтобы они отображались в столбце «Домены» на странице
+    «Объекты сканирования» и участвовали в будущих сканированиях
+    (как домены 3+ уровня — только резолв IP, без повторного поиска
+    поддоменов).
 
-    Берутся уникальные непустые значения parent у привязанных
-    поддоменов, каждый добавляется через add_target_domain
-    (INSERT OR IGNORE — без дубликатов). Возвращает число реально
-    добавленных новых доменов.
+    v1.6.7: раньше синхронизировался только parent (родительский
+    домен 2-го уровня) — он практически всегда уже есть в target_domains
+    (именно он и использовался для поиска поддоменов), из-за чего
+    кнопка «Привязать все новые» ничего реально не добавляла и столбец
+    «Домены» не обновлялся. Сейчас добавляется сам привязанный
+    поддомен (FQDN), а также его parent — на всякий случай, если он по
+    какой-то причине ещё не был привязан.
+
+    Каждый добавляется через add_target_domain (INSERT OR IGNORE —
+    без дубликатов). Возвращает число реально добавленных новых
+    доменов.
     """
     with connect() as c:
-        rows = c.execute(
-            "SELECT DISTINCT parent FROM discovered_subdomains "
-            "WHERE target_id=? AND bound=1 AND parent IS NOT NULL "
-            "AND TRIM(parent) <> ''", (target_id,)).fetchall()
-    parents = sorted({(r["parent"] or "").strip().lower().rstrip(".")
-                      for r in rows} - {""})
+        rows = [dict(r) for r in c.execute(
+            "SELECT subdomain, parent FROM discovered_subdomains "
+            "WHERE target_id=? AND bound=1", (target_id,))]
+    candidates = set()
+    for r in rows:
+        sub = (r.get("subdomain") or "").strip().lower().rstrip(".")
+        if sub:
+            candidates.add(sub)
+        parent = (r.get("parent") or "").strip().lower().rstrip(".")
+        if parent:
+            candidates.add(parent)
     existing = set(domains_for_target(target_id))
     added = 0
-    for p in parents:
-        if p not in existing:
-            add_target_domain(target_id, p)
+    for d in sorted(candidates):
+        if d not in existing:
+            add_target_domain(target_id, d)
             added += 1
     return added
 

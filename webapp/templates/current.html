@@ -1,9 +1,10 @@
 {% extends "base.html" %}
+{% set active_tab = 'current' %}
 {% block title %}Текущее сканирование — NetInv{% endblock %}
 {% block body_class %}report-page{% endblock %}
 {% block content %}
 
-{% from "_report_macros.html" import report_table %}
+{% from "_report_macros.html" import report_table, report_editing_script %}
 {% from "_run_macros.html" import errors_cell %}
 
 {% if active_list %}
@@ -100,7 +101,11 @@
     {# Живые хосты. #}
     <h3 class="section-title live">✅ Гарантированно «живые» хосты ({{ live_rows|length }})</h3>
     {% if live_rows %}
-      {{ report_table(live_rows, tkey='current-live', editable=false) }}
+      {# Баг 3 (v1.6.7): раньше было editable=false и без target_id — поэтому
+         поля «Описание»/«Администраторы» были нередактируемы, галочки
+         «Контроль и защита» заблокированы, а кнопки «Копировать»/«Скрыть»
+         вовсе не рендерились. #}
+      {{ report_table(live_rows, tkey='current-live', target_id=last_target.id if last_target else none) }}
     {% else %}
       <p class="muted">Нет хостов с подтверждёнными сервисами.</p>
     {% endif %}
@@ -108,10 +113,13 @@
     {# Артефакты Palo Alto. #}
     <h3 class="section-title palo">⚠ Возможные артефакты защиты Palo Alto ({{ palo_rows|length }})</h3>
     {% if palo_rows %}
-      {{ report_table(palo_rows, tkey='current-palo', editable=false) }}
+      {{ report_table(palo_rows, tkey='current-palo', target_id=last_target.id if last_target else none) }}
     {% else %}
       <p class="muted">Нет узлов-кандидатов на артефакты Palo Alto.</p>
     {% endif %}
+
+    {# Баг 3 (v1.6.7): подключаем тот же AJAX-скрипт сохранения, что и в report.html. #}
+    {{ report_editing_script(last_target.id if last_target else none) }}
   </section>
 
   {# Поддомены последнего скана. #}
