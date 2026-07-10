@@ -193,6 +193,27 @@ def build_nmap_cmd(target_spec, xml_out, profile="stealth", ports=None,
     return cmd
 
 
+def _strip_nse_scripts(cmd):
+    """v1.6.6 (П.1): вернуть команду nmap БЕЗ флага --script и его значения.
+
+    Используется для одноразового повтора после известного сбоя
+    планировщика NSE/nsock (assertion 'lua_status(L)==LUA_YIELD' в
+    nse_nsock.cc — upstream-баг nmap, см. nmap/nmap#1837, #1906, #3133).
+    Все остальные опции (включая -sV) сохраняются без изменений.
+    """
+    out = []
+    skip_next = False
+    for tok in cmd:
+        if skip_next:
+            skip_next = False
+            continue
+        if tok == "--script":
+            skip_next = True
+            continue
+        out.append(tok)
+    return out
+
+
 def parse_nmap_xml(xml_path, syn_mode="evasion"):
     """Парсинг XML-вывода nmap в список хостов с портами и сервисами."""
     tree = ET.parse(xml_path)
@@ -550,11 +571,15 @@ def _build_options_json(syn_mode, profile, ports, top_ports, full_ports,
     }, ensure_ascii=False)
 
 
-def _finalize_cancelled(run_id, slog, log, target_id, scan_class):
+def _finalize_cancelled(run_id, slog, log, target_id, scan_class, phases=None):
     """v1.6.1 (правка 1): корректно завершить прерванный оператором скан.
 
     Помечает запуск статусом «cancelled», фиксирует уже собранные узлы
     через пересчёт состояний и закрывает подробный лог. Возвращает run_id.
+
+    phases (v1.6.6, П.1): уже накопленный пофазовый статус (dns/nmap/webscan);
+    оставшиеся незаданные этапы подписываются как «skipped» (отменено до
+    их наступления).
     """
     finished = dt.datetime.now().isoformat(timespec="seconds")
     try:
@@ -564,6 +589,14 @@ def _finalize_cancelled(run_id, slog, log, target_id, scan_class):
     # v1.6.3: завершаем фазу CVE — сбрасываем состояние онлайн-источника.
     try:
         cve_lookup.online_teardown(log=log)
+    except Exception:  # noqa: BLE001
+        pass
+    # v1.6.6 (П.1): дописываем незаданные этапы как skipped и сохраняем.
+    try:
+        p = dict(phases or {})
+        for k in ("dns", "nmap", "webscan"):
+            p.setdefault(k, "skipped")
+        db.set_run_phases_json(run_id, json.dumps(p, ensure_ascii=False))
     except Exception:  # noqa: BLE001
         pass
     try:
@@ -689,6 +722,10 @@ def run_scan(target_id, profile="stealth", ports=None, top_ports=DEFAULT_TOP_POR
 
     # Нормализуем имя уровня «инфо» для фильтрации (треб. 6).
     _INFO_SEVERITIES = {"info", "инфо", "informational"}
+    # v1.6.6 (П.1): пофазовый статус запуска (dns/nmap/webscan ->
+    # ok|failed|skipped|off) для колонки «Ошибки сканирования» истории.
+    phases = {}
+    nmap_crash_retried = False
     db.init_db()
     target = db.get_target(target_id)
     if not target:
@@ -774,6 +811,9 @@ def run_scan(target_id, profile="stealth", ports=None, top_ports=DEFAULT_TOP_POR
         target_id, dns_brute=dns_brute, log=log, sink=sink, detail=detail_dns)
     # Статусы DNS-модулей (треб. 2). Если доменов нет — DNS-разведка
     # не выполнялась (нечего разведывать).
+    # v1.6.6 (П.1): фаза dns для колонки «Ошибки сканирования» —
+    # "off", если у объекта нет доменов (нечего разведывать).
+    phases["dns"] = "ok" if db.domains_for_target(target_id) else "off"
     if db.domains_for_target(target_id):
         sink.module("dns_recon", errorsink.STATUS_USED)
         sink.module("dns_brute", errorsink.STATUS_USED if dns_brute
@@ -851,6 +891,13 @@ def run_scan(target_id, profile="stealth", ports=None, top_ports=DEFAULT_TOP_POR
 
     if dry_run:
         log("[dry-run] nmap не запускается, выводится только командная строка.")
+        # v1.6.6 (П.1): dry-run — nmap/web фактически не выполнялись.
+        phases["nmap"] = "off"
+        phases["webscan"] = "off"
+        try:
+            db.set_run_phases_json(run_id, json.dumps(phases, ensure_ascii=False))
+        except Exception:  # noqa: BLE001
+            pass
         db.finish_run(run_id, "done", dt.datetime.now().isoformat(timespec="seconds"),
                       0, "dry-run")
         diff_engine.update_host_states(target_id, run_id, scan_class=scan_class)
@@ -859,6 +906,13 @@ def run_scan(target_id, profile="stealth", ports=None, top_ports=DEFAULT_TOP_POR
         return run_id
 
     if not which_or_die("nmap"):
+        # v1.6.6 (П.1): nmap не найден — фаза nmap провалена, web пропущен.
+        phases["nmap"] = "failed"
+        phases["webscan"] = "skipped"
+        try:
+            db.set_run_phases_json(run_id, json.dumps(phases, ensure_ascii=False))
+        except Exception:  # noqa: BLE001
+            pass
         db.finish_run(run_id, "error",
                       dt.datetime.now().isoformat(timespec="seconds"), 0,
                       "nmap не установлен")
@@ -871,7 +925,7 @@ def run_scan(target_id, profile="stealth", ports=None, top_ports=DEFAULT_TOP_POR
     try:
         _ck()
     except scancontrol.ScanCancelled:
-        return _finalize_cancelled(run_id, slog, log, target_id, scan_class)
+        return _finalize_cancelled(run_id, slog, log, target_id, scan_class, phases)
     # Треб. 7: запуск nmap с ПОТОКОВЫМ выводом в консоль и лог.
     _phase(scancontrol.PHASE_NMAP)  # П.3: фаза nmap-сканирования
     slog.section("ЗАПУСК NMAP (потоковый вывод, треб. 7)")
@@ -883,9 +937,47 @@ def run_scan(target_id, profile="stealth", ports=None, top_ports=DEFAULT_TOP_POR
         log_lines.append((proc.stdout or "")[-4000:])
         if proc.returncode != 0:
             log_lines.append(f"nmap завершился с кодом {proc.returncode}")
+        # v1.6.6 (П.1): известный сбой планировщика NSE/nsock — nmap
+        # аварийно завершается сигналом (assertion 'lua_status(L)==LUA_YIELD'
+        # в nse_nsock.cc, см. upstream nmap/nmap#1837, #1906, #3133). subprocess
+        # возвращает отрицательный returncode, если процесс убит сигналом.
+        # Не фатально — повторяем ту же команду без --script.
+        if proc.returncode is not None and proc.returncode < 0:
+            sig = -proc.returncode
+            emsg = (f"nmap аварийно завершён сигналом {sig} — известный сбой "
+                    "планировщика NSE/nsock (nse_nsock.cc, assertion "
+                    "lua_status(L)==LUA_YIELD). Повтор без NSE-скриптов...")
+            log(emsg)
+            sink.error("nmap", emsg, kind="error")
+            nmap_crash_retried = True
+            try:
+                os.remove(xml_out)
+            except OSError:
+                pass
+            retry_cmd = _strip_nse_scripts(cmd) + ["--stats-every", "10s"]
+            log(f"[*] Повтор команды nmap (без --script): {' '.join(retry_cmd)}")
+            proc = logsetup.run_streamed(retry_cmd, timeout=60 * 90, slog=slog,
+                                         label="nmap-retry", control=control)
+            log_lines.append((proc.stdout or "")[-4000:])
+            if proc.returncode != 0:
+                log_lines.append(f"nmap (повтор без NSE) завершился с кодом {proc.returncode}")
+            if proc.returncode is not None and proc.returncode < 0:
+                emsg2 = ("Повторный запуск nmap без NSE-скриптов также аварийно "
+                        f"завершён сигналом {-proc.returncode}.")
+                log(emsg2)
+                sink.error("nmap", emsg2, kind="error")
+            else:
+                log("[*] Повтор без NSE-скриптов выполнен без сбоя.")
     except subprocess.TimeoutExpired:
         log_lines.append("nmap: превышен общий таймаут")
     except Exception as e:  # noqa: BLE001
+        # v1.6.6 (П.1): фатальный сбой nmap — фаза nmap провалена, web не выполнялся.
+        phases["nmap"] = "failed"
+        phases["webscan"] = "off" if not do_web else "skipped"
+        try:
+            db.set_run_phases_json(run_id, json.dumps(phases, ensure_ascii=False))
+        except Exception:  # noqa: BLE001
+            pass
         db.finish_run(run_id, "error",
                       dt.datetime.now().isoformat(timespec="seconds"), 0, str(e))
         cve_lookup.online_teardown(log=log)   # v1.6.3: завершаем фазу CVE
@@ -897,12 +989,16 @@ def run_scan(target_id, profile="stealth", ports=None, top_ports=DEFAULT_TOP_POR
     try:
         _ck()
     except scancontrol.ScanCancelled:
-        return _finalize_cancelled(run_id, slog, log, target_id, scan_class)
+        return _finalize_cancelled(run_id, slog, log, target_id, scan_class, phases)
 
     hosts_up = 0
+    # v1.6.6 (П.1): флаг успешного парсинга XML nmap — основа итогового
+    # статуса фазы nmap в колонке «Ошибки сканирования».
+    nmap_parse_ok = False
     if os.path.exists(xml_out) and os.path.getsize(xml_out) > 0:
         try:
             parsed = parse_nmap_xml(xml_out, syn_mode)
+            nmap_parse_ok = True
         except ET.ParseError as e:
             parsed = []
             # Через log() — чтобы попало в scan_errors (треб. 3, перехват parse).
@@ -917,7 +1013,7 @@ def run_scan(target_id, profile="stealth", ports=None, top_ports=DEFAULT_TOP_POR
             # v1.6.1 (правка 1): отмена в ходе web/CVE-обработки узлов —
             # прерываем цикл между узлами, уже сохранённые данные остаются.
             if control is not None and control.is_cancelled():
-                return _finalize_cancelled(run_id, slog, log, target_id, scan_class)
+                return _finalize_cancelled(run_id, slog, log, target_id, scan_class, phases)
             if h["state"] != "up" and not h["ports"]:
                 continue
             hosts_up += 1
@@ -1037,8 +1133,22 @@ def run_scan(target_id, profile="stealth", ports=None, top_ports=DEFAULT_TOP_POR
     else:
         log_lines.append("XML-вывод nmap пуст — узлы не обнаружены или скан прерван.")
 
+    # v1.6.6 (П.1): итоговый пофазовый статус (dns/nmap/webscan) для колонки
+    # «Ошибки сканирования» страницы «История сканирований».
+    phases["nmap"] = "ok" if nmap_parse_ok else "failed"
+    if nmap_crash_retried and nmap_parse_ok:
+        phases["nmap_note"] = ("успешно после повтора без NSE-скриптов "
+                                "(см. сбой NSE/nsock)")
+    phases["webscan"] = ("off" if not do_web
+                          else ("ok" if nmap_parse_ok else "skipped"))
+
     finished = dt.datetime.now().isoformat(timespec="seconds")
-    db.finish_run(run_id, "done", finished, hosts_up, "\n".join(log_lines))
+    db.finish_run(run_id, "done" if nmap_parse_ok else "error", finished,
+                  hosts_up, "\n".join(log_lines))
+    try:
+        db.set_run_phases_json(run_id, json.dumps(phases, ensure_ascii=False))
+    except Exception:  # noqa: BLE001
+        pass
 
     try:
         os.remove(xml_out)

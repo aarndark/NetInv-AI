@@ -325,6 +325,13 @@ a.cve-link:hover{text-decoration:underline;color:#fecaca}
 .mod-status.st-skipped_missing{background:#33280a;color:#fcd34d}
 .mod-status.st-skipped_degraded{background:#33280a;color:#fdba74}
 .mod-status.st-off{background:var(--panel2);color:var(--muted)}
+/* v1.6.6 (П.1): пофазовый статус (dns/nmap/web) в колонке «Ошибки сканирования». */
+.phase-badges{display:flex;flex-wrap:wrap;gap:2px;margin-top:4px}
+.phase-badge{font-size:10.5px;padding:1px 7px;border-radius:12px;margin-right:4px;font-weight:600;display:inline-block}
+.phase-badge.ph-ok{background:#0c2e1a;color:#7ee2a8}
+.phase-badge.ph-failed{background:#3a0f0f;color:#f87171}
+.phase-badge.ph-skipped{background:#33280a;color:#fcd34d}
+.phase-badge.ph-off{background:var(--panel2);color:var(--muted)}
 .small{font-size:11px}
 .btn.small{padding:3px 9px;font-size:11px;margin-left:8px}
 

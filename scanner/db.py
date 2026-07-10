@@ -18,6 +18,7 @@ db.py — слой работы с SQLite для системы инвентар
 
 import datetime as _dt
 import ipaddress
+import json
 import os
 import sqlite3
 import threading
@@ -127,7 +128,12 @@ CREATE TABLE IF NOT EXISTS scan_runs (
     modules_json TEXT,
     -- v1.6.0 (треб. 4): абсолютный путь к файлу лога этого запуска
     -- (для «ссылки на лог» в статистике истории).
-    log_path TEXT
+    log_path TEXT,
+    -- v1.6.6 (П.1): пофазовый статус запуска (JSON-объект
+    -- {"dns":"ok|off","nmap":"ok|failed","webscan":"ok|skipped|off", ...},
+    -- может включать необязательные *_note поля) — для отображения
+    -- ok/failed/skipped по этапам в колонке «Ошибки сканирования».
+    phases_json TEXT
 );
 
 -- v1.6.0 (треб. 3): ошибки сканирования по модулям. Фиксируются ОЧЕВИДНЫЕ
@@ -432,7 +438,10 @@ def _migrate(c):
 
     # v1.6.0 (треб. 2, 4): полный набор опций, список модулей и
     # путь к логу в scan_runs.
-    for col in ("options_full_json", "modules_json", "log_path"):
+    # v1.6.6 (П.1): пофазовый статус запуска (dns/nmap/webscan ->
+    # ok|failed|skipped|off) — JSON, для колонки «Ошибки сканирования»
+    # страницы «История сканирований».
+    for col in ("options_full_json", "modules_json", "log_path", "phases_json"):
         if col not in rcols:
             c.execute(f"ALTER TABLE scan_runs ADD COLUMN {col} TEXT")
 
@@ -1038,6 +1047,18 @@ def set_run_modules_json(run_id, modules_json):
         c.commit()
 
 
+def set_run_phases_json(run_id, phases_json):
+    """v1.6.6 (П.1): сохранить пофазовый статус запуска (dns/nmap/webscan)
+    для колонки «Ошибки сканирования» страницы «История сканирований».
+    run_id может быть None на очень ранней стадии — тогда не пишем."""
+    if run_id is None:
+        return
+    with _LOCK, connect() as c:
+        c.execute("UPDATE scan_runs SET phases_json=? WHERE id=?",
+                  (phases_json, run_id))
+        c.commit()
+
+
 def delete_run(run_id):
     """v1.6.0 (треб. 1): удалить нерепрезентативный запуск из БД.
 
@@ -1161,6 +1182,11 @@ def get_run_full(run_id):
         run = dict(r)
     run["modules"] = modules_for_run(run_id)
     run["errors"] = errors_for_run(run_id)
+    # v1.6.6 (П.1): пофазовый статус (dns/nmap/webscan -> ok|failed|skipped|off).
+    try:
+        run["phases"] = json.loads(run.get("phases_json") or "{}")
+    except (ValueError, TypeError):
+        run["phases"] = {}
     return run
 
 

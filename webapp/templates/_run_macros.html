@@ -65,6 +65,19 @@
       <span class="err-ok" title="Очевидных ошибок инструментов не зафиксировано">✓ без ошибок</span>
     {% else %}
       <span class="err-count" title="Всего записей об ошибках/деградации">⚠ {{ total.n }}</span>
+      {# v1.6.6 (П.1): пофазовый статус (dns/nmap/web) — только когда есть ошибки. #}
+      {% if run.phases %}
+        <div class="phase-badges">
+          {% for key, label in [('dns', 'dns'), ('nmap', 'nmap'), ('webscan', 'web')] %}
+            {% set st = run.phases.get(key) %}
+            {% if st %}
+              <span class="phase-badge ph-{{ st }}"
+                    {% if key == 'nmap' and run.phases.get('nmap_note') %}title="{{ run.phases.get('nmap_note') }}"{% endif %}
+              >{{ label }}: {{ st }}</span>
+            {% endif %}
+          {% endfor %}
+        </div>
+      {% endif %}
     {% endif %}
     {% for mod, items in errmap.items() %}
       <details class="err-drop">
