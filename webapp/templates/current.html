@@ -77,10 +77,19 @@
       </div>
       <div class="report-actions">
         {% if last_target %}
+        {# Баг (v1.6.8): тумблер «показать скрытые уязвимости» — раньше был
+           только на странице «Полный отчёт объекта», на /current отсутствовал. #}
+        {% if show_hidden %}
+          <a class="btn primary" href="{{ url_for('current') }}"
+             title="Скрытые уязвимости сейчас показаны">👁 Скрытые: показаны</a>
+        {% else %}
+          <a class="btn" href="{{ url_for('current', show_hidden=1) }}"
+             title="Показать скрытые уязвимости">👁 Скрытые: скрыты</a>
+        {% endif %}
         <a class="btn" href="{{ url_for('report_csv', target_id=last_target.id, scan_class='main') }}">⬇ CSV</a>
         <a class="btn" target="_blank" rel="noopener"
-           href="{{ url_for('report_full', target_id=last_target.id, scan_class='main') }}">⧉ Открыть в отдельном окне</a>
-        <a class="btn" href="{{ url_for('report', target_id=last_target.id) }}">Полный отчёт объекта →</a>
+           href="{{ url_for('report_full', target_id=last_target.id, scan_class='main', show_hidden=1 if show_hidden else none) }}">⧉ Открыть в отдельном окне</a>
+        <a class="btn" href="{{ url_for('report', target_id=last_target.id, show_hidden=1 if show_hidden else none) }}">Полный отчёт объекта →</a>
         {% endif %}
       </div>
     </div>
@@ -105,7 +114,7 @@
          поля «Описание»/«Администраторы» были нередактируемы, галочки
          «Контроль и защита» заблокированы, а кнопки «Копировать»/«Скрыть»
          вовсе не рендерились. #}
-      {{ report_table(live_rows, tkey='current-live', target_id=last_target.id if last_target else none) }}
+      {{ report_table(live_rows, tkey='current-live', target_id=last_target.id if last_target else none, show_hidden=show_hidden) }}
     {% else %}
       <p class="muted">Нет хостов с подтверждёнными сервисами.</p>
     {% endif %}
@@ -113,7 +122,7 @@
     {# Артефакты Palo Alto. #}
     <h3 class="section-title palo">⚠ Возможные артефакты защиты Palo Alto ({{ palo_rows|length }})</h3>
     {% if palo_rows %}
-      {{ report_table(palo_rows, tkey='current-palo', target_id=last_target.id if last_target else none) }}
+      {{ report_table(palo_rows, tkey='current-palo', target_id=last_target.id if last_target else none, show_hidden=show_hidden) }}
     {% else %}
       <p class="muted">Нет узлов-кандидатов на артефакты Palo Alto.</p>
     {% endif %}

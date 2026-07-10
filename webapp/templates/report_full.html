@@ -29,8 +29,18 @@
       {% if summary.info %}<span class="sum-chip sum-info">инфо: <strong>{{ summary.info }}</strong></span>{% endif %}
     </div>
     <div class="fullreport-actions">
+      {# Баг (v1.6.8): тумблер «показать скрытые уязвимости» — в отдельном окне
+         show_hidden уже передавался в report_table, но кнопки для его переключения не
+         было. #}
+      {% if show_hidden %}
+        <a class="btn primary" href="{{ url_for('report_full', target_id=target.id, scan_class=scan_class) }}"
+           title="Скрытые уязвимости сейчас показаны">👁 Скрытые: показаны</a>
+      {% else %}
+        <a class="btn" href="{{ url_for('report_full', target_id=target.id, scan_class=scan_class, show_hidden=1) }}"
+           title="Показать скрытые уязвимости">👁 Скрытые: скрыты</a>
+      {% endif %}
       <a class="btn" href="{{ url_for('report_csv', target_id=target.id, scan_class=scan_class) }}">⬇ CSV</a>
-      <a class="btn" href="{{ url_for('report', target_id=target.id, scan_class=scan_class) }}">← К обычному виду</a>
+      <a class="btn" href="{{ url_for('report', target_id=target.id, scan_class=scan_class, show_hidden=1 if show_hidden else none) }}">← К обычному виду</a>
     </div>
   </header>
 

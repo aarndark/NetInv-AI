@@ -510,6 +510,11 @@ def current():
     результаты ПОСЛЕДНЕГО основного скана (как на /report/) +
     поддомены + ошибки этого запуска.
     """
+    # Баг (v1.6.8): на /current не было переключателя «показать скрытые
+    # уязвимости» — раньше это было незаметно, т.к. кнопки Скрыть/Копировать
+    # тут вовсе не работали (баг 3, v1.6.7), а после их исправления скрытые
+    # уязвимости стало некуда вернуть без перехода в «Полный отчёт объекта».
+    show_hidden = request.args.get("show_hidden") == "1"
     active = _running_all()
     targets = db.list_targets()
     tmap = {t["id"]: t for t in targets}
@@ -537,7 +542,7 @@ def current():
     scan_class = "main"
     if last_run and not active_list:
         target_id = last_run["target_id"]
-        rows = _build_report_rows(target_id, "main")
+        rows = _build_report_rows(target_id, "main", show_hidden=show_hidden)
         live_rows = [r for r in rows if r["is_live"]]
         palo_rows = [r for r in rows if not r["is_live"]]
         summary = _report_summary(rows, live_rows, palo_rows)
@@ -550,7 +555,7 @@ def current():
                            rows=rows, live_rows=live_rows, palo_rows=palo_rows,
                            summary=summary, subdomains=subdomains,
                            subs_summary=subs_summary, errors=errors,
-                           scan_class=scan_class)
+                           scan_class=scan_class, show_hidden=show_hidden)
 
 
 @app.route("/current/status")
